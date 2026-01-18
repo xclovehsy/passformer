@@ -116,3 +116,24 @@ if __name__ == "__main__":
     )
 
     trainer.train()
+
+    with open("D:/dev/passformer/src/utils/qsort.ll", "r") as f:
+        llvm = f.read()
+    input_ids = encoder_tokenizer(llvm, max_length=50, return_tensors="pt")
+    labels = decoder_tokenizer("mem2reg instcombine gvn", max_length=25, return_tensors="pt")
+    autophase = torch.randn(1, 56)
+    print(input_ids)
+    print(labels)
+
+    outputs = model(input_ids=input_ids["input_ids"], labels=labels["input_ids"], autophase=autophase)
+    loss, logits = outputs.loss, outputs.logits
+    print(loss)
+    print(logits)
+
+    print("before generate:")
+    print(model.generate(input_ids["input_ids"], autophase=autophase))
+
+    model.save_pretrained("D:/dev/passformer/checkpoints/passformer_test")
+    
+    model_test = PassformerModel.from_pretrained("D:/dev/passformer/checkpoints/passformer_test")
+    print(model_test.generate(input_ids["input_ids"], autophase=autophase))
