@@ -1,0 +1,49 @@
+model:
+  modern_bert_id: /home/xucong24/Compiler/work_dirs/modernbert/20250718_044355/final_model
+  opti_seq_tokenizer_id: /home/xucong24/Compiler/checkpoints/opti_seq_tokenizer
+
+data:
+  data_dir: /home/xucong24/Compiler/datasets/llvm_opti_seq
+  encoder_maxlen: 512
+  decoder_maxlen: 512
+
+output:
+  base_work_dir: /home/xucong24/Compiler/work_dirs/llvm_opt_gen
+
+gpt2_config:
+  vocab_size: 128                # 词汇表大小
+  n_positions: 512                # 最大的token序列长度
+  n_embd: 768                      # 嵌入层的维度
+  n_layer: 12                      # Transformer的层数
+  n_head: 12                       # 每一层中的注意力头数
+  # n_inner: none                    # 内部feed-forward网络的维度（如果为None，通常等于n_embd）
+  activation_function: gelu_new  # 激活函数，'gelu_new'是当前版本的gelu激活函数
+  resid_pdrop: 0.1                 # 残差连接的dropout概率
+  embd_pdrop: 0.1                # 嵌入层的dropout概率
+  attn_pdrop: 0.1                # 自注意力机制的dropout概率
+  layer_norm_epsilon: 1e-05       # 层归一化的epsilon值
+  initializer_range: 0.02         # 权重初始化范围
+  scale_attn_weights: true        # 是否按层数反转来缩放注意力权重
+  use_cache: true                 # 是否缓存模型
+  bos_token_id: 126             # 语言模型的起始 token ID（例如，GPT2的[CLS]）
+  eos_token_id: 127             # 语言模型的结束 token ID（例如，GPT2的[SEP]）
+  scale_attn_by_inverse_layer_idx: false # 是否按层数反向缩放注意力权重
+  reorder_and_upcast_attn: false  # 是否重新排序并升高注意力
+  add_cross_attention: true # 添加交叉注意力层
+
+training_args:
+  num_train_epochs: 50
+  per_device_train_batch_size: 16
+  per_device_eval_batch_size: 16
+  gradient_accumulation_steps: 2
+  eval_strategy: epoch
+  save_strategy: epoch
+  save_total_limit: 2
+  load_best_model_at_end: true
+  logging_strategy: steps
+  logging_steps: 100
+  learning_rate: 5e-5
+  warmup_steps: 500
+  weight_decay: 0.01
+  report_to: tensorboard
+  overwrite_output_dir: true

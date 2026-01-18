@@ -1,0 +1,53 @@
+# LLVM Optimization Sequence Generation Training Configuration
+# 使用 AutoTokenizer (HuggingFace) 作为 encoder tokenizer
+
+model:
+  instbert_id: /home/xucong24/Compiler/work_dirs/instbert_poj104_mlm/20260106_152024/final_model      # 预训练的 ModernBERT/InstBERT 模型路径
+  inst2vec_tokenizer_id: /home/xucong24/Compiler/checkpoints/Inst2VecTokenizer  # Inst2Vec tokenizer 路径
+  opti_seq_tokenizer_id: /home/xucong24/Compiler/checkpoints/OptiSeqTokenizer   # 优化序列 tokenizer 路径
+
+data:
+  data_dir: /home/xucong24/Compiler/datasets/ga_llvm_37k
+  tokenized_data_dir: /home/xucong24/Compiler/datasets/ga_llvm_37k_passformer_tokenized  # 可选，tokenize 后的数据集保存/加载路径
+  encoder_maxlen: 8192
+  decoder_maxlen: 256
+
+output:
+  base_work_dir: /home/xucong24/Compiler/work_dirs/passformer_gallvm_seq2seq
+
+# GPT-2 Decoder 配置
+gpt2_config:
+  vocab_size: 128                 # 会被 decoder tokenizer 的 vocab_size 覆盖
+  n_positions: 512                # 最大位置编码长度
+  n_embd: 768                     # 嵌入维度（建议与 encoder hidden_size 一致）
+  n_layer: 6                      # Transformer 层数
+  n_head: 12                      # 注意力头数
+  activation_function: gelu_new
+  resid_pdrop: 0.1
+  embd_pdrop: 0.1
+  attn_pdrop: 0.1
+  layer_norm_epsilon: 1e-05
+  initializer_range: 0.02
+  scale_attn_weights: true
+  use_cache: true
+  add_cross_attention: true       # 必须为 true，启用交叉注意力
+
+training_args:
+  num_train_epochs: 20              # 30 epochs 通常足够，避免过拟合
+  per_device_train_batch_size: 4
+  per_device_eval_batch_size: 4
+  gradient_accumulation_steps: 8
+  eval_strategy: epoch
+  save_strategy: epoch
+  save_total_limit: 3               # 多保留一个检查点
+  load_best_model_at_end: true
+  metric_for_best_model: eval_loss  # 用 eval_loss 选最佳模型
+  greater_is_better: false          # loss 越小越好
+  logging_strategy: steps
+  logging_steps: 50                 # 更频繁记录，方便观察曲线
+  learning_rate: 5e-5
+  warmup_steps: 500
+  weight_decay: 0.01
+  report_to: tensorboard
+  overwrite_output_dir: false
+

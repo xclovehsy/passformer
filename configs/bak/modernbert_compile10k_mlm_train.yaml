@@ -1,0 +1,29 @@
+model:
+  model_id: /home/xucong24/Compiler/checkpoints/ModernBERT-base
+
+data:
+  data_dir: /home/xucong24/Compiler/datasets/ComPile_llvm18_100k
+  max_length: 512
+
+output:
+  base_work_dir: /home/xucong24/Compiler/work_dirs/llvm_opt_gen
+
+mlm:
+  mlm_probability: 0.3
+
+training_args:
+  num_train_epochs: 10
+  per_device_train_batch_size: 32
+  per_device_eval_batch_size: 32
+  gradient_accumulation_steps: 2
+  eval_strategy: epoch
+  save_strategy: epoch
+  save_total_limit: 2
+  load_best_model_at_end: true
+  logging_strategy: steps
+  logging_steps: 100
+  learning_rate: 5e-5
+  warmup_steps: 500
+  weight_decay: 0.01
+  report_to: tensorboard
+  overwrite_output_dir: true

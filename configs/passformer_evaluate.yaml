@@ -1,0 +1,43 @@
+# Passformer 模型评估配置文件
+
+evaluation:
+  # 训练好的模型路径 (final_model 目录)
+  model_path: /home/xucong24/Compiler/work_dirs/passformer_gallvm_seq2seq/20260110_082146/checkpoint-14406
+  
+  # benchmark 目录，包含 .bc 文件
+  # cbench-v1 数据集
+  benchmark_dir: /home/xucong24/Compiler/datasets/cbench-v1
+  
+  # 可选：指定要评估的 benchmark 名称列表
+  # 不指定则评估目录下所有 .bc 文件
+  # 可以使用简短名称 (如 "susan") 或完整名称 (如 "benchmark_cbench-v1_susan")
+  benchmarks: null  # 评估全部
+  # benchmarks:
+  #   - susan
+  #   - bzip2
+  #   - sha
+  #   - qsort
+  #   - dijkstra
+  
+  # LLVM 工具链路径
+  llvm_path: /home/xucong24/.local/share/compiler_gym/llvm-v0/bin
+  
+  # 评估结果输出目录 (可选，默认在模型目录下创建 evaluation_results)
+  output_dir: null
+  
+  # 模型推理参数
+  max_input_length: 1024    # encoder 最大输入长度
+  max_output_length: 256    # decoder 最大生成长度
+  num_beams: 4              # beam search 的 beam 数量
+
+# 使用方法:
+# python -m src.evaluation.passformer_evaluate --config configs/passformer_evaluate.yaml
+#
+# 或者直接通过命令行参数:
+# python -m src.evaluation.passformer_evaluate \
+#   --model_path /path/to/final_model \
+#   --benchmark_dir /home/xucong24/Compiler/datasets/cbench-v1 \
+#   --llvm_path /home/xucong24/.local/share/compiler_gym/llvm-v0/bin \
+#   --benchmarks susan bzip2 sha
+
+

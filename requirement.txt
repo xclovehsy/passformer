@@ -1,0 +1,4 @@
+wheel==0.38.0
+setuptools==57.5.0 
+gym==0.21
+compiler_gym
