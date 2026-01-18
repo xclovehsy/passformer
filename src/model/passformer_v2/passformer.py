@@ -1,19 +1,3 @@
-# coding=utf-8
-# Copyright 2018 The HuggingFace Inc. team.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-"""Classes to support Encoder-Decoder architectures"""
-
 import gc
 import inspect
 import os
@@ -33,18 +17,10 @@ from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import auto_docstring, logging
 from transformers.models.auto.configuration_auto import AutoConfig
 from transformers.models.auto.modeling_auto import AutoModel, AutoModelForCausalLM
-from .config_passformer_v2 import EncoderDecoderConfig
+from passformer_config import PassformerConfig
 
 
 logger = logging.get_logger(__name__)
-
-
-DEPRECATION_WARNING = (
-    "Version v4.12.0 introduces a better way to train encoder-decoder models by computing the loss inside the"
-    " encoder-decoder framework rather than in the decoder itself. You may observe training discrepancies if"
-    " fine-tuning a model trained with versions anterior to 4.12.0. The decoder_input_ids are now created based on the"
-    " labels, no need to pass them yourself anymore."
-)
 
 
 def shift_tokens_right(input_ids: torch.Tensor, pad_token_id: int, decoder_start_token_id: int):
@@ -66,16 +42,10 @@ def shift_tokens_right(input_ids: torch.Tensor, pad_token_id: int, decoder_start
 
 
 @auto_docstring
-class EncoderDecoderModel(PreTrainedModel, GenerationMixin):
-    r"""
-    [`EncoderDecoderModel`] is a generic model class that will be instantiated as a transformer architecture with one
-    of the base model classes of the library as encoder and another one as decoder when created with the
-    :meth*~transformers.AutoModel.from_pretrained* class method for the encoder and
-    :meth*~transformers.AutoModelForCausalLM.from_pretrained* class method for the decoder.
-    """
+class PassformerModel(PreTrainedModel, GenerationMixin):
 
-    config: EncoderDecoderConfig
-    base_model_prefix = "encoder_decoder"
+    config: PassformerConfig
+    base_model_prefix = "passformer"
     main_input_name = "input_ids"
     supports_gradient_checkpointing = True
     _supports_param_buffer_assignment = False
@@ -97,7 +67,7 @@ class EncoderDecoderModel(PreTrainedModel, GenerationMixin):
         if config is None and (encoder is None or decoder is None):
             raise ValueError("Either a configuration or an encoder and a decoder has to be provided.")
         if config is None:
-            config = EncoderDecoderConfig.from_encoder_decoder_configs(encoder.config, decoder.config)
+            config = PassformerConfig.from_encoder_decoder_configs(encoder.config, decoder.config)
         else:
             if not isinstance(config, self.config_class):
                 raise ValueError(f"Config: {config} has to be of type {self.config_class}")
@@ -210,9 +180,9 @@ class EncoderDecoderModel(PreTrainedModel, GenerationMixin):
         Example:
 
         ```python
-        >>> from transformers import EncoderDecoderModel
+        >>> from transformers import PassformerModel
 
-        >>> model = EncoderDecoderModel.from_pretrained("patrickvonplaten/bert2bert-cnn_dailymail-fp16")
+        >>> model = PassformerModel.from_pretrained("patrickvonplaten/bert2bert-cnn_dailymail-fp16")
         ```"""
 
         from_tf = kwargs.pop("from_tf", False)
@@ -283,7 +253,7 @@ class EncoderDecoderModel(PreTrainedModel, GenerationMixin):
                 del tf_model
                 gc.collect()
 
-                model = EncoderDecoderModel.from_encoder_decoder_pretrained(
+                model = PassformerModel.from_encoder_decoder_pretrained(
                     encoder_dir, decoder_dir, encoder_from_tf=True, decoder_from_tf=True
                 )
                 # This is only for copying some specific attributes of this particular model.
@@ -352,14 +322,14 @@ class EncoderDecoderModel(PreTrainedModel, GenerationMixin):
         Example:
 
         ```python
-        >>> from transformers import EncoderDecoderModel
+        >>> from transformers import PassformerModel
 
         >>> # initialize a bert2bert from two pretrained BERT models. Note that the cross-attention layers will be randomly initialized
-        >>> model = EncoderDecoderModel.from_encoder_decoder_pretrained("google-bert/bert-base-uncased", "google-bert/bert-base-uncased")
+        >>> model = PassformerModel.from_encoder_decoder_pretrained("google-bert/bert-base-uncased", "google-bert/bert-base-uncased")
         >>> # saving model after fine-tuning
         >>> model.save_pretrained("./bert2bert")
         >>> # load fine-tuned model
-        >>> model = EncoderDecoderModel.from_pretrained("./bert2bert")
+        >>> model = PassformerModel.from_pretrained("./bert2bert")
         ```"""
 
         kwargs_encoder = {
@@ -440,7 +410,7 @@ class EncoderDecoderModel(PreTrainedModel, GenerationMixin):
             decoder = AutoModelForCausalLM.from_pretrained(decoder_pretrained_model_name_or_path, **kwargs_decoder)
 
         # instantiate config with corresponding kwargs
-        config = EncoderDecoderConfig.from_encoder_decoder_configs(encoder.config, decoder.config, **kwargs)
+        config = PassformerConfig.from_encoder_decoder_configs(encoder.config, decoder.config, **kwargs)
         return cls(encoder=encoder, decoder=decoder, config=config)
 
     @auto_docstring
@@ -490,11 +460,11 @@ class EncoderDecoderModel(PreTrainedModel, GenerationMixin):
         Examples:
 
         ```python
-        >>> from transformers import EncoderDecoderModel, BertTokenizer
+        >>> from transformers import PassformerModel, BertTokenizer
         >>> import torch
 
         >>> tokenizer = BertTokenizer.from_pretrained("google-bert/bert-base-uncased")
-        >>> model = EncoderDecoderModel.from_encoder_decoder_pretrained(
+        >>> model = PassformerModel.from_encoder_decoder_pretrained(
         ...     "google-bert/bert-base-uncased", "google-bert/bert-base-uncased"
         ... )  # initialize Bert2Bert from pre-trained checkpoints
 
@@ -510,7 +480,7 @@ class EncoderDecoderModel(PreTrainedModel, GenerationMixin):
 
         >>> # save and load from pretrained
         >>> model.save_pretrained("bert2bert")
-        >>> model = EncoderDecoderModel.from_pretrained("bert2bert")
+        >>> model = PassformerModel.from_pretrained("bert2bert")
 
         >>> # generation
         >>> generated = model.generate(input_ids)
@@ -600,24 +570,24 @@ class EncoderDecoderModel(PreTrainedModel, GenerationMixin):
 
     def resize_token_embeddings(self, *args, **kwargs):
         raise NotImplementedError(
-            "Resizing the embedding layers via the EncoderDecoderModel directly is not supported. Please use the"
+            "Resizing the embedding layers via the PassformerModel directly is not supported. Please use the"
             " respective methods of the wrapped objects (model.encoder.resize_token_embeddings(...) or"
             " model.decoder.resize_token_embeddings(...))"
         )
 
 
-__all__ = ["EncoderDecoderModel"]
+__all__ = ["PassformerModel"]
 
 if __name__ == "__main__": 
     from transformers import AutoModel, GPT2Config, GPT2LMHeadModel
     
-    encoder = AutoModel.from_pretrained('/home/xucong24/Compiler/checkpoints/modernbert_poj104_mlm')
+    encoder = AutoModel.from_pretrained('D:/dev/passformer/checkpoints/final_model')
     
     # Decoder
     gpt2_config = GPT2Config()
     gpt2 = GPT2LMHeadModel(gpt2_config)
     
     # Encoder-decoder model
-    model = EncoderDecoderModel(encoder=encoder, decoder=gpt2)
+    model = PassformerModel(encoder=encoder, decoder=gpt2)
     print(model)
     
