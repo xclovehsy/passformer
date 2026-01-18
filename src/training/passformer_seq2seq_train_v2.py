@@ -76,6 +76,8 @@ def tokenize_dataset(cfg, logger, dataset, inst2vec_tokenizer, opti_seq_tokenize
     existing_columns = set(dataset.column_names)
     remove_columns = [col for col in remove_columns if col in existing_columns]
 
+    # dataset = dataset.select(range(100))
+
     tokenized_data = dataset.map(
         tokenize_fn,
         batched=False,
@@ -83,6 +85,8 @@ def tokenize_dataset(cfg, logger, dataset, inst2vec_tokenizer, opti_seq_tokenize
         num_proc=32, 
         desc="Tokenizing"
     )
+
+    tokenized_data = tokenized_data.train_test_split(test_size=cfg["data"]["test_size"], seed=cfg["data"]["split_seed"])
     
     return tokenized_data
 
