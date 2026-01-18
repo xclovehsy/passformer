@@ -117,3 +117,5 @@ output/
 checkpoints/
 logs/
 nohup.out
+
+trainer_output/

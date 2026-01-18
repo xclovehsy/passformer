@@ -3,7 +3,7 @@ import inspect
 import os
 import tempfile
 import warnings
-from typing import Optional, Union
+from typing import Optional, Union, Tuple
 
 import torch
 from torch import nn
@@ -17,7 +17,12 @@ from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import auto_docstring, logging
 from transformers.models.auto.configuration_auto import AutoConfig
 from transformers.models.auto.modeling_auto import AutoModel, AutoModelForCausalLM
-from passformer_config import PassformerConfig
+from .passformer_config import PassformerConfig
+from .fusion import AutophaseProjection, AutophaseCrossAttention
+from ..tokenizer import (
+    Inst2VecTokenizer,
+    OptiSeqTokenizer
+)
 
 
 logger = logging.get_logger(__name__)
@@ -41,7 +46,7 @@ def shift_tokens_right(input_ids: torch.Tensor, pad_token_id: int, decoder_start
     return shifted_input_ids
 
 
-@auto_docstring
+
 class PassformerModel(PreTrainedModel, GenerationMixin):
 
     config: PassformerConfig
@@ -135,6 +140,19 @@ class PassformerModel(PreTrainedModel, GenerationMixin):
                 "following discussion on GitHub: https://github.com/huggingface/transformers/issues/23350"
             )
 
+        # fussion module
+        encoder_hidden_size = self.encoder.config.hidden_size
+        decoder_hidden_size = self.decoder.config.n_embd
+        logger.info(f"encoder_hidden_size: {encoder_hidden_size}, decoder_hidden_size: {decoder_hidden_size}")
+        
+        if self.config.fusion_method == "add":
+            # 加到 encoder 输出
+            self.autophase_proj = AutophaseProjection(
+                self.config.autophase_dim, encoder_hidden_size
+            )
+        elif self.config.fusion_method is not None and self.config.fusion_method != "none":
+            raise ValueError(f"Unknown fusion method: {self.config.fusion_method}")
+        
         # tie encoder, decoder weights if config set accordingly
         self.tie_weights()
 
@@ -161,6 +179,18 @@ class PassformerModel(PreTrainedModel, GenerationMixin):
             self.encoder._init_weights(module)
         elif module in self.decoder.modules():
             self.decoder._init_weights(module)
+        elif module in self.autophase_proj.modules():
+            # Initialize autophase modules and other custom modules
+            initializer_range = getattr(self.config, 'initializer_range', 0.02)
+            if isinstance(module, (nn.Linear,)):
+                # Initialize linear layers with normal distribution
+                module.weight.data.normal_(mean=0.0, std=initializer_range)
+                if module.bias is not None:
+                    module.bias.data.zero_()
+            elif isinstance(module, (nn.LayerNorm,)):
+                # Initialize layer norm
+                module.bias.data.zero_()
+                module.weight.data.fill_(1.0)
 
     def get_encoder(self):
         return self.encoder
@@ -176,95 +206,6 @@ class PassformerModel(PreTrainedModel, GenerationMixin):
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, *model_args, **kwargs):
-        r"""
-        Example:
-
-        ```python
-        >>> from transformers import PassformerModel
-
-        >>> model = PassformerModel.from_pretrained("patrickvonplaten/bert2bert-cnn_dailymail-fp16")
-        ```"""
-
-        from_tf = kwargs.pop("from_tf", False)
-        if from_tf:
-            from transformers import TFEncoderDecoderModel
-
-            # a workaround to load from tensorflow checkpoint
-            # Using `_tf_model` won't work, because the weight names in the encoder/decoder of `_tf_model` get
-            # extended before saving those components. For example, The name of `_tf_model.encoder.vit` is
-            # `[top model name]/encoder/vit`, but the name of `tf_model.encoder.vit` is `[top model name]/vit`. The
-            # [top model name] is handled (stripped) by the conversion method, and the former case gets extra `encoder`,
-            # which should not occur when we want to save the components alone.
-            # There was a (very) ugly potential fix, which wasn't integrated to `transformers`: see
-            #   https://github.com/huggingface/transformers/pull/13222/commits/dbb3c9de76eee235791d2064094654637c99f36d#r697304245
-            #   (the change in `src/transformers/modeling_tf_utils.py`)
-            _tf_model = TFEncoderDecoderModel.from_pretrained(pretrained_model_name_or_path, *model_args, **kwargs)
-            config = _tf_model.config
-
-            # Using `tf_model` instead
-            encoder = _tf_model.encoder.__class__(_tf_model.config.encoder)
-            decoder = _tf_model.decoder.__class__(_tf_model.config.decoder)
-            # Make sure models are built
-            encoder(encoder.dummy_inputs)
-            decoder(decoder.dummy_inputs)
-
-            # Get the variable correspondence between `_tf_model` and `encoder` and `decoder`
-            encoder_variables = {}
-            for v in encoder.trainable_variables + encoder.non_trainable_variables:
-                encoder_variables["/".join(v.name.split("/")[1:])] = v
-            decoder_variables = {}
-            for v in decoder.trainable_variables + decoder.non_trainable_variables:
-                decoder_variables["/".join(v.name.split("/")[1:])] = v
-
-            _encoder_variables = {}
-            for v in _tf_model.encoder.trainable_variables + _tf_model.encoder.non_trainable_variables:
-                _encoder_variables["/".join(v.name.split("/")[2:])] = v
-            _decoder_variables = {}
-            for v in _tf_model.decoder.trainable_variables + _tf_model.decoder.non_trainable_variables:
-                _decoder_variables["/".join(v.name.split("/")[2:])] = v
-
-            # assign weight values to `encoder` and `decoder` from `_tf_model`
-            for name, v in encoder_variables.items():
-                v.assign(_encoder_variables[name])
-            for name, v in decoder_variables.items():
-                v.assign(_decoder_variables[name])
-
-            tf_model = TFEncoderDecoderModel(encoder=encoder, decoder=decoder)
-
-            # Deal with `enc_to_dec_proj`
-            if hasattr(_tf_model, "enc_to_dec_proj"):
-                tf_model(tf_model.dummy_inputs)
-                tf_model.enc_to_dec_proj.kernel.assign(_tf_model.enc_to_dec_proj.kernel)
-                tf_model.enc_to_dec_proj.bias.assign(_tf_model.enc_to_dec_proj.bias)
-
-            with tempfile.TemporaryDirectory() as tmpdirname:
-                encoder_dir = os.path.join(tmpdirname, "encoder")
-                decoder_dir = os.path.join(tmpdirname, "decoder")
-                tf_model.encoder.save_pretrained(encoder_dir)
-                tf_model.decoder.save_pretrained(decoder_dir)
-
-                if hasattr(tf_model, "enc_to_dec_proj"):
-                    enc_to_dec_proj_weight = torch.transpose(
-                        torch.from_numpy(tf_model.enc_to_dec_proj.kernel.numpy()), 1, 0
-                    )
-                    enc_to_dec_proj_bias = torch.from_numpy(tf_model.enc_to_dec_proj.bias.numpy())
-
-                del _tf_model
-                del tf_model
-                gc.collect()
-
-                model = PassformerModel.from_encoder_decoder_pretrained(
-                    encoder_dir, decoder_dir, encoder_from_tf=True, decoder_from_tf=True
-                )
-                # This is only for copying some specific attributes of this particular model.
-                model.config = config
-
-                if hasattr(model, "enc_to_dec_proj"):
-                    model.enc_to_dec_proj.weight.data = enc_to_dec_proj_weight.contiguous()
-                    model.enc_to_dec_proj.bias.data = enc_to_dec_proj_bias.contiguous()
-
-                return model
-
         return super().from_pretrained(pretrained_model_name_or_path, *model_args, **kwargs)
 
     @classmethod
@@ -413,11 +354,30 @@ class PassformerModel(PreTrainedModel, GenerationMixin):
         config = PassformerConfig.from_encoder_decoder_configs(encoder.config, decoder.config, **kwargs)
         return cls(encoder=encoder, decoder=decoder, config=config)
 
-    @auto_docstring
+    def _fuse_autophase(
+        self,
+        encoder_hidden_states: torch.Tensor,
+        autophase: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+
+        if autophase.dtype != torch.float32 and autophase.dtype != torch.float16:
+            autophase = autophase.float()
+        
+        
+        if self.config.fusion_method == "add":
+            # Add autophase embedding to all positions]
+            autophase_emb = self.autophase_proj(autophase)  # [batch, 1, hidden]
+            fused = encoder_hidden_states + autophase_emb
+            return fused
+        else:
+            raise ValueError(f"Unknown fusion method: {self.config.fusion_method}")
+    
+
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.FloatTensor] = None,
+        autophase: Optional[torch.FloatTensor] = None,
         decoder_input_ids: Optional[torch.LongTensor] = None,
         decoder_attention_mask: Optional[torch.BoolTensor] = None,
         encoder_outputs: Optional[tuple[torch.FloatTensor]] = None,
@@ -510,6 +470,11 @@ class PassformerModel(PreTrainedModel, GenerationMixin):
 
         encoder_hidden_states = encoder_outputs[0]
 
+        if autophase is None and self.config.fusion_method is not None:
+            raise ValueError("Autophase is required")
+
+        encoder_hidden_states = self._fuse_autophase(encoder_hidden_states, autophase)
+
         # optionally project encoder_hidden_states
         if (
             self.encoder.config.hidden_size != self.decoder.config.hidden_size
@@ -522,7 +487,7 @@ class PassformerModel(PreTrainedModel, GenerationMixin):
                 labels, self.config.pad_token_id, self.config.decoder_start_token_id
             )
             if decoder_attention_mask is None:
-                decoder_attention_mask = decoder_input_ids.new_tensor(decoder_input_ids != self.config.pad_token_id)
+                decoder_attention_mask = (decoder_input_ids != self.config.pad_token_id).clone()
 
         # Decode
         decoder_outputs = self.decoder(
@@ -542,7 +507,7 @@ class PassformerModel(PreTrainedModel, GenerationMixin):
         # Compute loss independent from decoder (as some shift the logits inside them)
         loss = None
         if labels is not None:
-            warnings.warn(DEPRECATION_WARNING, FutureWarning)
+            # warnings.warn(DEPRECATION_WARNING, FutureWarning)
             logits = decoder_outputs.logits if return_dict else decoder_outputs[0]
             loss_fct = CrossEntropyLoss()
             loss = loss_fct(logits.reshape(-1, self.decoder.config.vocab_size), labels.view(-1))
@@ -582,12 +547,47 @@ if __name__ == "__main__":
     from transformers import AutoModel, GPT2Config, GPT2LMHeadModel
     
     encoder = AutoModel.from_pretrained('D:/dev/passformer/checkpoints/final_model')
-    
-    # Decoder
-    gpt2_config = GPT2Config()
-    gpt2 = GPT2LMHeadModel(gpt2_config)
-    
+    config = {
+        "n_embd": 768,
+        "n_head": 12,
+        "n_layer": 6,
+        "bos_token_id": 126,
+        "eos_token_id": 127,
+        "vocab_size": 128,
+        "add_cross_attention": True,
+        "architectures": [
+            "GPT2LMHeadModel"
+        ],
+        "task_specific_params": {
+            "text-generation": {
+            "do_sample": True,
+            "max_length": 50
+            }
+        },
+    }
+
+    decoder_config = GPT2Config(**config)
+    decoder = GPT2LMHeadModel(decoder_config)
+
     # Encoder-decoder model
-    model = PassformerModel(encoder=encoder, decoder=gpt2)
+    model = PassformerModel(encoder=encoder, decoder=decoder)
     print(model)
+
+    encoder_tokenizer = Inst2VecTokenizer.from_pretrained("D:/dev/passformer/checkpoints/Inst2VecTokenizer")
+    decoder_tokenizer = OptiSeqTokenizer.from_pretrained("D:/dev/passformer/checkpoints/OptiSeqTokenizer")
+
+    with open("D:/dev/passformer/src/utils/qsort.ll", "r") as f:
+        llvm = f.read()
+    input_ids = encoder_tokenizer(llvm, max_length=50, return_tensors="pt")
+    labels = decoder_tokenizer("mem2reg instcombine gvn", max_length=25, return_tensors="pt")
+    autophase = torch.randn(1, 56)
+    print(input_ids)
+    print(labels)
+
+    outputs = model(input_ids=input_ids["input_ids"], labels=labels["input_ids"], autophase=autophase)
+    loss, logits = outputs.loss, outputs.logits
+    print(loss)
+    print(logits)
+
+    print(model.generate(input_ids["input_ids"], autophase=autophase))
     

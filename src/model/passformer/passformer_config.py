@@ -10,6 +10,11 @@ class PassformerConfig(PretrainedConfig):
     model_type = "passformer"
     sub_configs = {"encoder": AutoConfig, "decoder": AutoConfig}
     has_no_defaults_at_init = True
+    fusion_method = 'add'
+    autophase_dim = 56
+    decoder_start_token_id = 126
+    pad_token_id = 125
+    vocab_size = 128
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -26,6 +31,12 @@ class PassformerConfig(PretrainedConfig):
         self.encoder = AutoConfig.for_model(encoder_model_type, **encoder_config)
         self.decoder = AutoConfig.for_model(decoder_model_type, **decoder_config)
         self.is_encoder_decoder = True
+
+        self.fusion_method = kwargs.get("fusion_method", "add")
+        self.autophase_dim = kwargs.get("autophase_dim", 56)
+        self.decoder_start_token_id = kwargs.get("decoder_start_token_id", 126)
+        self.pad_token_id = kwargs.get("pad_token_id", 125)
+        self.vocab_size = kwargs.get("vocab_size", 128)
 
     @classmethod
     def from_encoder_decoder_configs(
