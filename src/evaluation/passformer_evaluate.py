@@ -57,7 +57,7 @@ class EvaluationSummary:
     avg_total_time: float
 
 
-def get_dataset_benchmarks(dataset_name: str, env=None) -> List[str]:
+def get_dataset_benchmarks(dataset_name: str, env=None, exclude_benchmarks: Optional[List[str]] = None) -> List[str]:
     should_close = False
     if env is None:
         env = compiler_gym.make("llvm-v0")
@@ -67,7 +67,7 @@ def get_dataset_benchmarks(dataset_name: str, env=None) -> List[str]:
         # 获取数据集
         dataset = env.datasets[dataset_name]
         # 获取所有 benchmark 的 URI
-        benchmarks = [str(bm.uri) for bm in dataset.benchmarks()]
+        benchmarks = [str(bm.uri) for bm in dataset.benchmarks() if exclude_benchmarks is None or bm.uri not in exclude_benchmarks]
         return benchmarks
     finally:
         if should_close:
@@ -142,7 +142,6 @@ def evaluate_single_benchmark(
     env,
     benchmark_name: str,
     benchmark_uri_or_path: str,
-    llvm_path: Optional[str] = None,
     max_input_length: Optional[int] = None,
     max_output_length: Optional[int] = None,
     num_beams: int = 1,
@@ -313,160 +312,18 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     
-    # 配置文件或直接参数
-    parser.add_argument(
-        "--config",
-        type=str,
-        default=None,
-        help="配置文件路径 (YAML)"
-    )
-    
     # 模型路径
-    parser.add_argument(
-        "--model_path",
-        type=str,
-        default=None,
-        help="模型路径"
-    )
-    parser.add_argument(
-        "--encoder_tokenizer_path",
-        type=str,
-        default=None,
-        help="Encoder tokenizer 路径"
-    )
-    parser.add_argument(
-        "--decoder_tokenizer_path",
-        type=str,
-        default=None,
-        help="Decoder tokenizer 路径"
-    )
-    
-    # Benchmark 配置
-    parser.add_argument(
-        "--benchmark_dir",
-        type=str,
-        default=None,
-        help="Benchmark 目录（包含 .bc 文件），与 --dataset 互斥"
-    )
-    parser.add_argument(
-        "--dataset",
-        type=str,
-        default=None,
-        help="CompilerGym 数据集名称（如 cbench-v1, anghabench-v1），与 --benchmark_dir 互斥。参考: https://compilergym.com/llvm/index.html#datasets"
-    )
-    parser.add_argument(
-        "--benchmarks",
-        type=str,
-        nargs="+",
-        default=None,
-        help="要评估的 benchmark 名称列表（可选，不指定则评估全部）。对于数据集，可以是 benchmark URI 或索引"
-    )
-    parser.add_argument(
-        "--max_benchmarks",
-        type=int,
-        default=None,
-        help="限制评估的 benchmark 数量（用于大数据集采样）"
-    )
-    
-    # LLVM 配置
-    parser.add_argument(
-        "--llvm_path",
-        type=str,
-        default=None,
-        help="LLVM 工具链路径（用于转换 bitcode）"
-    )
-    
-    # 输出配置
-    parser.add_argument(
-        "--output_dir",
-        type=str,
-        default=None,
-        help="结果输出目录"
-    )
-    parser.add_argument(
-        "--output_format",
-        type=str,
-        choices=["json", "csv", "both"],
-        default="both",
-        help="输出格式"
-    )
-    
-    # 推理参数
-    parser.add_argument(
-        "--max_input_length",
-        type=int,
-        default=None,
-        help="最大输入长度"
-    )
-    parser.add_argument(
-        "--max_output_length",
-        type=int,
-        default=None,
-        help="最大输出长度"
-    )
-    parser.add_argument(
-        "--num_beams",
-        type=int,
-        default=1,
-        help="Beam search 的 beam 数量"
-    )
-    parser.add_argument(
-        "--do_sample",
-        action="store_true",
-        help="是否使用采样"
-    )
-    
-    # 设备配置
-    parser.add_argument(
-        "--device",
-        type=str,
-        default="cuda" if torch.cuda.is_available() else "cpu",
-        help="设备 (cuda/cpu)"
-    )
-    
+    parser.add_argument("--model_path", type=str, default=None)
+    parser.add_argument("--encoder_tokenizer_path", type=str, default=None)
+    parser.add_argument("--decoder_tokenizer_path", type=str, default=None)
+    parser.add_argument("--benchmark_dir", type=str, default=None)
+    parser.add_argument("--datasets", type=str, default=None)
+    parser.add_argument("--output_dir", type=str, default=None)
+    parser.add_argument("--max_input_length", type=int, default=1024)
+    parser.add_argument("--max_output_length", type=int, default=32)
     args = parser.parse_args()
-    
-    # 加载配置
-    if args.config:
-        config = load_config(args.config)
-        eval_config = config.get("evaluation", {})
-        
-        # 从配置文件读取参数（如果命令行未指定）
-        if args.model_path is None:
-            args.model_path = eval_config.get("model_path")
-        if args.benchmark_dir is None:
-            args.benchmark_dir = eval_config.get("benchmark_dir")
-        if args.benchmarks is None:
-            args.benchmarks = eval_config.get("benchmarks")
-        if args.llvm_path is None:
-            args.llvm_path = eval_config.get("llvm_path")
-        if args.output_dir is None:
-            args.output_dir = eval_config.get("output_dir")
-        if args.max_input_length is None:
-            args.max_input_length = eval_config.get("max_input_length")
-        if args.max_output_length is None:
-            args.max_output_length = eval_config.get("max_output_length")
-        if args.num_beams == 1:
-            args.num_beams = eval_config.get("num_beams", 1)
-    
-    # 验证必需参数
-    if args.model_path is None:
-        parser.error("必须指定 --model_path 或通过 --config 配置文件指定")
-    if args.benchmark_dir is None:
-        parser.error("必须指定 --benchmark_dir 或通过 --config 配置文件指定")
-    
-    # 设置默认输出目录
     if args.output_dir is None:
         args.output_dir = os.path.join(args.model_path, "evaluation_results")
-    
-    print("=" * 60)
-    print("Passformer 模型评估")
-    print("=" * 60)
-    print(f"模型路径: {args.model_path}")
-    print(f"Benchmark 目录: {args.benchmark_dir}")
-    print(f"输出目录: {args.output_dir}")
-    print(f"设备: {args.device}")
-    print()
     
     # 加载模型和 tokenizer
     print("正在加载模型和 tokenizer...")
@@ -482,54 +339,21 @@ def main():
     print(f"\n正在获取 benchmark 列表...")
     benchmark_list = []
     
-    if args.dataset:
-        # 从 CompilerGym 数据集获取
-        # 需要先创建临时环境来获取数据集信息
-        print(f"正在从数据集 '{args.dataset}' 获取 benchmarks...")
+    if args.datasets:
+        print(f"正在从 datasets '{args.datasets}' 获取 benchmarks...")
         temp_env = compiler_gym.make("llvm-v0")
         try:
             benchmark_uris = get_dataset_benchmarks(args.dataset, temp_env)
-            print(f"数据集 '{args.dataset}' 包含 {len(benchmark_uris)} 个 benchmark")
-            
-            # 如果指定了 benchmarks，进行过滤
-            if args.benchmarks:
-                filtered_uris = []
-                for bm in args.benchmarks:
-                    # 支持完整 URI 或索引
-                    if bm.startswith("benchmark://") or bm.startswith("generator://"):
-                        if bm in benchmark_uris:
-                            filtered_uris.append(bm)
-                    else:
-                        # 尝试作为索引
-                        try:
-                            idx = int(bm)
-                            if 0 <= idx < len(benchmark_uris):
-                                filtered_uris.append(benchmark_uris[idx])
-                        except ValueError:
-                            # 尝试名称匹配
-                            for uri in benchmark_uris:
-                                if bm in uri:
-                                    filtered_uris.append(uri)
-                                    break
-                benchmark_uris = filtered_uris
-                print(f"过滤后剩余 {len(benchmark_uris)} 个 benchmark")
-            
-            # 限制数量（如果指定）
-            if args.max_benchmarks and args.max_benchmarks > 0:
-                benchmark_uris = benchmark_uris[:args.max_benchmarks]
-                print(f"限制为前 {len(benchmark_uris)} 个 benchmark")
-            
-            # 转换为 (name, uri) 元组列表
-            benchmark_list = [(uri.split("/")[-1] if "/" in uri else uri, uri) for uri in benchmark_uris]
+            print(f"datasets '{args.datasets}' 包含 {len(benchmark_uris)} 个 benchmark")
         except Exception as e:
-            print(f"错误: 无法从数据集 '{args.dataset}' 获取 benchmarks: {e}")
+            print(f"错误: 无法从 datasets '{args.datasets}' 获取 benchmarks: {e}")
             temp_env.close()
             return
         finally:
             temp_env.close()
     else:
         # 从文件目录获取
-        benchmark_list = find_bc_files(args.benchmark_dir, args.benchmarks)
+        benchmark_list = find_bc_files(args.benchmark_dir)
     
     print(f"共找到 {len(benchmark_list)} 个 benchmark")
     
@@ -538,25 +362,8 @@ def main():
         return
     
     # 创建 CompilerGym 环境
-    print("\n正在创建 CompilerGym 环境...")
-    # 检查模型是否需要 autophase
-    requires_autophase = (
-        hasattr(inference.model.config, 'fusion_method') and 
-        inference.model.config.fusion_method is not None and 
-        inference.model.config.fusion_method != "none"
-    )
-    
-    if requires_autophase:
-        # 如果模型需要 autophase，尝试使用包含 Autophase 的环境
-        try:
-            env = compiler_gym.make("llvm-autophase-ic-v0")
-        except:
-            env = compiler_gym.make("llvm-v0")
-    else:
-        env = compiler_gym.make("llvm-v0")
-    
-    # 设置观察空间
-    env.observation_space = "IrInstructionCount"
+    print("\n创建 CompilerGym 环境...")
+    env = compiler_gym.make("llvm-v0")
     
     # 评估每个 benchmark
     print("\n开始评估...")
@@ -568,24 +375,12 @@ def main():
             env=env,
             benchmark_name=benchmark_name,
             benchmark_uri_or_path=benchmark_uri_or_path,
-            llvm_path=args.llvm_path,
             max_input_length=args.max_input_length,
             max_output_length=args.max_output_length,
-            num_beams=args.num_beams,
-            do_sample=args.do_sample,
+            # num_beams=args.num_beams,
+            # do_sample=args.do_sample,
         )
         results.append(result)
-        
-        if result.success:
-            print(f"\n{benchmark_name}:")
-            print(f"  原始 IR 指令数: {result.original_ir_count}")
-            print(f"  优化后 IR 指令数: {result.optimized_ir_count}")
-            print(f"  改进比例: {result.improvement_ratio:.4f}")
-            if result.relative_to_o3 is not None:
-                print(f"  相对 O3: {result.relative_to_o3:.4f}")
-            print(f"  优化序列: {result.pass_sequence}")
-        else:
-            print(f"\n{benchmark_name}: 失败 - {result.error_message}")
     
     # 关闭环境
     env.close()
@@ -593,22 +388,6 @@ def main():
     # 计算汇总
     print("\n正在计算汇总...")
     summary = compute_summary(results)
-    
-    # 打印汇总
-    print("\n" + "=" * 60)
-    print("评估汇总")
-    print("=" * 60)
-    print(f"总 benchmark 数: {summary.total_benchmarks}")
-    print(f"成功评估: {summary.successful_benchmarks}")
-    print(f"失败评估: {summary.failed_benchmarks}")
-    print(f"\n平均改进比例: {summary.avg_improvement_ratio:.4f}")
-    if summary.avg_relative_to_o3 is not None:
-        print(f"平均相对 O3: {summary.avg_relative_to_o3:.4f}")
-    if summary.avg_relative_to_oz is not None:
-        print(f"平均相对 Oz: {summary.avg_relative_to_oz:.4f}")
-    print(f"\n平均推理时间: {summary.avg_inference_time:.4f} 秒")
-    print(f"平均优化时间: {summary.avg_optimization_time:.4f} 秒")
-    print(f"平均总时间: {summary.avg_total_time:.4f} 秒")
     
     # 保存结果
     print("\n正在保存结果...")
