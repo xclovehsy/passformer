@@ -36,9 +36,8 @@ class BenchmarkResult:
     oz_ir_count: Optional[int] = None
     pass_sequence: str = ""
     num_passes: int = 0
-    improvement_ratio: float = 0.0
-    relative_to_o3: Optional[float] = None
-    relative_to_oz: Optional[float] = None
+    rewards: List[float] = []
+    returns: float = 0.0
     inference_time: float = 0.0
     optimization_time: float = 0.0
     total_time: float = 0.0
@@ -52,25 +51,13 @@ class EvaluationSummary:
     total_benchmarks: int
     successful_benchmarks: int
     failed_benchmarks: int
-    avg_improvement_ratio: float
-    avg_relative_to_o3: Optional[float]
-    avg_relative_to_oz: Optional[float]
+    avg_returns: float
     avg_inference_time: float
     avg_optimization_time: float
     avg_total_time: float
 
 
 def get_dataset_benchmarks(dataset_name: str, env=None) -> List[str]:
-    """
-    从 CompilerGym 获取指定数据集的所有 benchmark URI
-    
-    Args:
-        dataset_name: 数据集名称，如 "cbench-v1"
-        env: CompilerGym 环境（可选，如果不提供会创建临时环境）
-    
-    Returns:
-        list: benchmark URI 列表
-    """
     should_close = False
     if env is None:
         env = compiler_gym.make("llvm-v0")
@@ -88,16 +75,6 @@ def get_dataset_benchmarks(dataset_name: str, env=None) -> List[str]:
 
 
 def find_bc_files(benchmark_dir: str, benchmarks: Optional[List[str]] = None) -> List[Tuple[str, str]]:
-    """
-    查找 benchmark 目录中的 .bc 文件
-    
-    Args:
-        benchmark_dir: benchmark 目录路径
-        benchmarks: 可选的 benchmark 名称列表（用于过滤）
-    
-    Returns:
-        List of (benchmark_name, file_path) tuples
-    """
     benchmark_dir = Path(benchmark_dir)
     if not benchmark_dir.exists():
         raise ValueError(f"Benchmark directory does not exist: {benchmark_dir}")
@@ -120,15 +97,6 @@ def find_bc_files(benchmark_dir: str, benchmarks: Optional[List[str]] = None) ->
 
 
 def create_benchmark(benchmark_uri_or_path: str):
-    """
-    创建 benchmark 对象，支持 URI 或文件路径
-    
-    Args:
-        benchmark_uri_or_path: benchmark URI (如 "benchmark://cbench-v1/0") 或文件路径
-    
-    Returns:
-        Benchmark 对象或 URI 字符串（如果已经是 URI）
-    """
     # 检查是否是 URI 格式
     if benchmark_uri_or_path.startswith("benchmark://") or benchmark_uri_or_path.startswith("generator://"):
         # 直接返回 URI，CompilerGym 可以直接使用
@@ -138,35 +106,35 @@ def create_benchmark(benchmark_uri_or_path: str):
         return FileBenchmark(benchmark_uri_or_path)
 
 
-def apply_pass_sequence(env, pass_sequence: str) -> Tuple[bool, Optional[str]]:
+def apply_pass_sequence(env, pass_sequence: str) -> Tuple[bool, Optional[str], List[float], float]:
+    print(f"apply_pass_sequence, step:begin, benchmark: {env.benchmark}, pass_sequence: {pass_sequence}")
+    
     if not pass_sequence or not pass_sequence.strip():
-        return True, None
+        return True, None, [], 0.0
     
     passes = pass_sequence.strip().split()
+    rewards = []
     total_reward = 0.0
     
     try:
         for pass_name in passes:
-            if not pass_name.startswith("-"):
-                pass_name = "-" + pass_name
-            
-            # 查找 pass 在 action space 中的索引
             try:
                 action_idx = env.action_space.flags.index(pass_name)
             except ValueError:
                 # Pass 不在 action space 中，跳过
-                continue
+                raise ValueError(f"Pass {pass_name} not in action space")
             
-            # 应用 pass
+            print(f"apply_pass_sequence, step:iter_begin, pass_name: {pass_name}")
+            
             observation, reward, done, info = env.step(action_idx)
             total_reward += reward
-            
-            if done:
-                break
-        
-        return True, None
+            rewards.append(reward)        
+            print(f"apply_pass_sequence, step:iter_end, pass_name: {pass_name}, reward: {reward}")
+
+        print(f"apply_pass_sequence, step:end, benchmark: {env.benchmark}, total_reward: {total_reward}")
+        return True, None, rewards, total_reward
     except Exception as e:
-        return False, str(e)
+        return False, str(e), [], 0.0
 
 
 def evaluate_single_benchmark(
@@ -180,27 +148,11 @@ def evaluate_single_benchmark(
     num_beams: int = 1,
     do_sample: bool = False,
 ) -> BenchmarkResult:
-    """
-    评估单个 benchmark
-    
-    Args:
-        inference: PassformerInference 实例
-        env: CompilerGym 环境
-        benchmark_name: benchmark 名称
-        benchmark_uri_or_path: benchmark URI (如 "benchmark://cbench-v1/0") 或文件路径
-        llvm_path: LLVM 工具链路径（用于转换 bitcode）
-        max_input_length: 最大输入长度
-        max_output_length: 最大输出长度
-        num_beams: beam search 的 beam 数量
-        do_sample: 是否使用采样
-    
-    Returns:
-        BenchmarkResult 对象
-    """
+
     start_time = time.time()
     
     try:
-        # 创建 benchmark（支持 URI 或文件路径）
+        # 创建 benchmark
         benchmark = create_benchmark(benchmark_uri_or_path)
         
         # 重置环境
@@ -208,53 +160,13 @@ def evaluate_single_benchmark(
         
         # 获取初始指标
         original_ir_count = env.observation["IrInstructionCount"]
-        o3_ir_count = env.observation.get("IrInstructionCountO3")
-        oz_ir_count = env.observation.get("IrInstructionCountOz")
+        o3_ir_count = env.observation["IrInstructionCountO3"]
+        oz_ir_count = env.observation["IrInstructionCountOz"]
         
-        # 获取 LLVM IR（用于模型输入）
-        if isinstance(benchmark_uri_or_path, str) and not benchmark_uri_or_path.startswith(("benchmark://", "generator://")):
-            # 如果是文件路径，尝试使用 llvm_path 转换
-            if llvm_path:
-                llvm_ir = bitcode_to_llvm_ir(benchmark_uri_or_path, llvm_path)
-            else:
-                # 尝试从环境获取 IR
-                llvm_ir = env.observation.get("Ir", "")
-                if not llvm_ir:
-                    raise ValueError("无法获取 LLVM IR，请提供 llvm_path")
-        else:
-            # 对于 URI benchmark，直接从环境获取 IR
-            llvm_ir = env.observation.get("Ir", "")
-            if not llvm_ir:
-                raise ValueError("无法从环境获取 LLVM IR")
-        
-        # 检查模型是否需要 autophase
-        requires_autophase = (
-            hasattr(inference.model.config, 'fusion_method') and 
-            inference.model.config.fusion_method is not None and 
-            inference.model.config.fusion_method != "none"
-        )
-        
-        autophase = None
-        if requires_autophase:
-            # 从环境获取 autophase 特征
-            try:
-                # 尝试从环境 observation 获取 Autophase
-                if "Autophase" in env.observation:
-                    autophase_raw = env.observation["Autophase"]
-                    if isinstance(autophase_raw, (list, np.ndarray)):
-                        autophase = torch.tensor(autophase_raw, dtype=torch.float32).unsqueeze(0)
-                    else:
-                        # 如果是其他格式，尝试转换
-                        autophase = torch.tensor(list(autophase_raw), dtype=torch.float32).unsqueeze(0)
-                else:
-                    # 如果环境不支持 Autophase observation，尝试使用 compute_autophase
-                    from src.observation.autophase import compute_autophase
-                    autophase_list = compute_autophase(llvm_ir)
-                    autophase = torch.tensor(autophase_list, dtype=torch.float32).unsqueeze(0)
-            except Exception as e:
-                print(f"警告: 无法获取 autophase 特征: {e}")
-                autophase = None
-        
+        # 获取 LLVM IR 和 Autophase
+        llvm_ir = env.observation["Ir"]
+        autophase = env.observation["Autophase"]
+    
         # 模型推理生成优化序列
         inference_start = time.time()
         pass_sequence = inference.generate(
@@ -269,20 +181,14 @@ def evaluate_single_benchmark(
         
         # 应用优化序列
         opt_start = time.time()
-        success, error_msg = apply_pass_sequence(env, pass_sequence)
+        success, error_msg, rewards, total_reward = apply_pass_sequence(env, pass_sequence)
         optimization_time = time.time() - opt_start
         
         if not success:
             return BenchmarkResult(
-                benchmark=benchmark_name,
-                benchmark_path=benchmark_uri_or_path,
-                original_ir_count=original_ir_count,
-                optimized_ir_count=original_ir_count,
-                pass_sequence=pass_sequence,
+                benchmark=env.benchmark,
+                pass_sequence=benchmark_uri_or_path,
                 num_passes=len(pass_sequence.split()) if pass_sequence else 0,
-                inference_time=inference_time,
-                optimization_time=optimization_time,
-                total_time=time.time() - start_time,
                 success=False,
                 error_message=error_msg,
             )
@@ -290,23 +196,8 @@ def evaluate_single_benchmark(
         # 获取优化后的指标
         optimized_ir_count = env.observation["IrInstructionCount"]
         
-        # 计算改进比例
-        if original_ir_count > 0:
-            improvement_ratio = (original_ir_count - optimized_ir_count) / original_ir_count
-        else:
-            improvement_ratio = 0.0
-        
-        # 计算相对于 O3/Oz 的比例
-        relative_to_o3 = None
-        if o3_ir_count is not None and o3_ir_count > 0:
-            relative_to_o3 = optimized_ir_count / o3_ir_count
-        
-        relative_to_oz = None
-        if oz_ir_count is not None and oz_ir_count > 0:
-            relative_to_oz = optimized_ir_count / oz_ir_count
-        
         return BenchmarkResult(
-            benchmark=benchmark_name,
+            benchmark=env.benchmark,
             benchmark_path=benchmark_uri_or_path,
             original_ir_count=original_ir_count,
             optimized_ir_count=optimized_ir_count,
@@ -314,24 +205,19 @@ def evaluate_single_benchmark(
             oz_ir_count=oz_ir_count,
             pass_sequence=pass_sequence,
             num_passes=len(pass_sequence.split()) if pass_sequence else 0,
-            improvement_ratio=improvement_ratio,
-            relative_to_o3=relative_to_o3,
-            relative_to_oz=relative_to_oz,
+            rewards=rewards,
+            returns=total_reward,
             inference_time=inference_time,
             optimization_time=optimization_time,
             total_time=time.time() - start_time,
             success=True,
+            error_message=None,
         )
     
     except Exception as e:
         return BenchmarkResult(
             benchmark=benchmark_name,
             benchmark_path=benchmark_uri_or_path,
-            original_ir_count=0,
-            optimized_ir_count=0,
-            inference_time=0.0,
-            optimization_time=0.0,
-            total_time=time.time() - start_time,
             success=False,
             error_message=str(e),
         )
@@ -343,25 +229,20 @@ def compute_summary(results: List[BenchmarkResult]) -> EvaluationSummary:
     failed_results = [r for r in results if not r.success]
     
     if not successful_results:
-        return EvaluationSummary(
-            total_benchmarks=len(results),
-            successful_benchmarks=0,
-            failed_benchmarks=len(failed_results),
-            avg_improvement_ratio=0.0,
-            avg_relative_to_o3=None,
-            avg_relative_to_oz=None,
-            avg_inference_time=0.0,
-            avg_optimization_time=0.0,
-            avg_total_time=0.0,
-        )
+        raise ValueError("No successful results")
     
+    def geometric_mean(values):
+        """计算几何平均数，过滤掉 None 和非正数"""
+        positive_values = [v for v in values if v is not None and v > 0]
+        if not positive_values:
+            return None
+        return np.exp(np.mean(np.log(positive_values)))
+
     return EvaluationSummary(
         total_benchmarks=len(results),
         successful_benchmarks=len(successful_results),
         failed_benchmarks=len(failed_results),
-        avg_improvement_ratio=np.mean([r.improvement_ratio for r in successful_results]),
-        avg_relative_to_o3=np.mean([r.relative_to_o3 for r in successful_results if r.relative_to_o3 is not None]) if any(r.relative_to_o3 is not None for r in successful_results) else None,
-        avg_relative_to_oz=np.mean([r.relative_to_oz for r in successful_results if r.relative_to_oz is not None]) if any(r.relative_to_oz is not None for r in successful_results) else None,
+        avg_returns=geometric_mean([r.returns for r in successful_results]),
         avg_inference_time=np.mean([r.inference_time for r in successful_results]),
         avg_optimization_time=np.mean([r.optimization_time for r in successful_results]),
         avg_total_time=np.mean([r.total_time for r in successful_results]),
@@ -374,15 +255,6 @@ def save_results(
     output_dir: str,
     format: str = "both"
 ):
-    """
-    保存评估结果
-    
-    Args:
-        results: 评估结果列表
-        summary: 评估汇总
-        output_dir: 输出目录
-        format: 输出格式 ("json", "csv", "both")
-    """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     
@@ -406,7 +278,7 @@ def save_results(
         fieldnames = [
             "benchmark", "benchmark_path", "original_ir_count", "optimized_ir_count",
             "o3_ir_count", "oz_ir_count", "pass_sequence", "num_passes",
-            "improvement_ratio", "relative_to_o3", "relative_to_oz",
+            "returns", "rewards",
             "inference_time", "optimization_time", "total_time", "success", "error_message"
         ]
         
@@ -427,11 +299,7 @@ def save_results(
         f.write(f"成功评估: {summary.successful_benchmarks}\n")
         f.write(f"失败评估: {summary.failed_benchmarks}\n\n")
         f.write("性能指标:\n")
-        f.write(f"  平均改进比例: {summary.avg_improvement_ratio:.4f}\n")
-        if summary.avg_relative_to_o3 is not None:
-            f.write(f"  平均相对 O3: {summary.avg_relative_to_o3:.4f}\n")
-        if summary.avg_relative_to_oz is not None:
-            f.write(f"  平均相对 Oz: {summary.avg_relative_to_oz:.4f}\n")
+        f.write(f"  平均返回值: {summary.avg_returns:.4f}\n")
         f.write("\n时间统计:\n")
         f.write(f"  平均推理时间: {summary.avg_inference_time:.4f} 秒\n")
         f.write(f"  平均优化时间: {summary.avg_optimization_time:.4f} 秒\n")
