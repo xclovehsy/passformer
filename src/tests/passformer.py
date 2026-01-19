@@ -105,7 +105,28 @@ if __name__ == "__main__":
 
 
     training_args = TrainingArguments(
-        num_train_epochs=2,
+        # output_dir="./checkpoints/passformer_test_output",  # 添加输出目录
+        num_train_epochs=5,              # 30 epochs 通常足够，避免过拟合
+        per_device_train_batch_size=4,
+        per_device_eval_batch_size=4,
+        # gradient_accumulation_steps=8,
+        eval_strategy="epoch",
+        save_strategy="epoch",
+        save_total_limit=3,               # 多保留一个检查点
+        load_best_model_at_end=True,
+        metric_for_best_model="eval_loss",  # 用 eval_loss 选最佳模型
+        greater_is_better=False,          # loss 越小越好
+        logging_strategy="steps",
+        logging_steps=10,                 # 增加logging_steps，避免loss显示异常
+        learning_rate=5e-5,
+        warmup_steps=500,
+        weight_decay=0.01,
+        report_to="tensorboard",
+        overwrite_output_dir=False,
+        # 添加以下参数来确保训练和评估的一致性
+        dataloader_drop_last=False,      # 不要丢弃最后一个不完整的batch
+        prediction_loss_only=True,        # 只计算loss，不计算其他指标
+        remove_unused_columns=True,       # 移除未使用的列
     )
 
     trainer = Trainer(

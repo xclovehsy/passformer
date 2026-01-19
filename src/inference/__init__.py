@@ -1,7 +1,7 @@
 """Inference module for trained models."""
 
 from .instbert_inference import InstBertInference
-from .optseq_gen_inference import OptSeqGenInference
+from .passformer_inference import PassformerInference
 
-__all__ = ["InstBertInference", "OptSeqGenInference"]
+__all__ = ["InstBertInference", "PassformerInference"]
 
