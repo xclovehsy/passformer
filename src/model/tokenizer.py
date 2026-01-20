@@ -321,7 +321,9 @@ class OptiSeqTokenizer:
         max_length: Optional[int] = None, 
         truncation=True, 
         padding=False,
-        return_tensors="pt"
+        return_tensors="pt",
+        add_bos: bool = False,
+        add_eos: bool = True
     ):
         """Encode text to token ids.
         
@@ -332,7 +334,12 @@ class OptiSeqTokenizer:
         tokens = self._tokenize(text)
         token_ids = [self._convert_token_to_id(t) for t in tokens]
 
-        token_ids = [self.bos_token_id] + token_ids + [self.eos_token_id]
+        # For encoder-decoder models, encoder typically doesn't need BOS token
+        # BOS is mainly for generation tasks, encoder just encodes input
+        if add_bos:
+            token_ids = [self.bos_token_id] + token_ids
+        if add_eos:
+            token_ids = token_ids + [self.eos_token_id]
 
         if truncation and max_length is not None:
             token_ids = token_ids[:max_length]

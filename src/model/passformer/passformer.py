@@ -546,31 +546,32 @@ __all__ = ["PassformerModel"]
 if __name__ == "__main__": 
     from transformers import AutoModel, GPT2Config, GPT2LMHeadModel
     
-    encoder = AutoModel.from_pretrained('D:/dev/passformer/checkpoints/final_model')
-    config = {
-        "n_embd": 768,
-        "n_head": 12,
-        "n_layer": 6,
-        "bos_token_id": 126,
-        "eos_token_id": 127,
-        "vocab_size": 128,
-        "add_cross_attention": True,
-        "architectures": [
-            "GPT2LMHeadModel"
-        ],
-        "task_specific_params": {
-            "text-generation": {
-            "do_sample": True,
-            "max_length": 50
-            }
-        },
-    }
+    # encoder = AutoModel.from_pretrained('D:/dev/passformer/checkpoints/final_model')
+    # config = {
+    #     "n_embd": 768,
+    #     "n_head": 12,
+    #     "n_layer": 6,
+    #     "bos_token_id": 126,
+    #     "eos_token_id": 127,
+    #     "vocab_size": 128,
+    #     "add_cross_attention": True,
+    #     "architectures": [
+    #         "GPT2LMHeadModel"
+    #     ],
+    #     "task_specific_params": {
+    #         "text-generation": {
+    #         "do_sample": True,
+    #         "max_length": 50
+    #         }
+    #     },
+    # }
 
-    decoder_config = GPT2Config(**config)
-    decoder = GPT2LMHeadModel(decoder_config)
+    # decoder_config = GPT2Config(**config)
+    # decoder = GPT2LMHeadModel(decoder_config)
 
     # Encoder-decoder model
-    model = PassformerModel(encoder=encoder, decoder=decoder)
+    # model = PassformerModel(encoder=encoder, decoder=decoder)
+    model = PassformerModel.from_pretrained("D:/dev/passformer/checkpoints/final_model")
     print(model)
 
     encoder_tokenizer = Inst2VecTokenizer.from_pretrained("D:/dev/passformer/checkpoints/Inst2VecTokenizer")
@@ -589,5 +590,5 @@ if __name__ == "__main__":
     print(loss)
     print(logits)
 
-    print(model.generate(input_ids["input_ids"], autophase=autophase))
+    print(model.generate(input_ids["input_ids"], autophase=autophase, do_sample=True))
     
