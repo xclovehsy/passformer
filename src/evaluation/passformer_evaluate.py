@@ -167,6 +167,8 @@ def evaluate_single_benchmark(
         
         # 获取 LLVM IR 和 Autophase
         llvm_ir = env.observation["Ir"]
+        llvm_ir_length = len(llvm_ir)
+        llvm_ir = llvm_ir[:min(10000, llvm_ir_length)]
         autophase = env.observation["Autophase"]
     
         # 模型推理生成优化序列
@@ -397,7 +399,7 @@ def main():
     
     # 保存结果
     print("\n正在保存结果...")
-    save_results(results, summary, args.output_dir, args.output_format)
+    save_results(results, summary, args.output_dir, "both")
     
     print("\n评估完成！")
 
@@ -407,9 +409,7 @@ if __name__ == "__main__":
 
 """
 python -m src.evaluation.passformer_evaluate \
-        --model_path /home/xucong24/Compiler/work_dirs/passformer_gallvm_seq2seq_v2/20260119_014052/checkpoint-10980 \
-        --encoder_tokenizer_path /home/xucong24/Compiler/checkpoints/Inst2VecTokenizer \
-        --decoder_tokenizer_path /home/xucong24/Compiler/checkpoints/OptiSeqTokenizer \
+        --model_path /home/xucong24/Compiler/work_dirs/passformer_gallvm_seq2seq_v2/20260119_014052/final_model \
         --datasets cbench-v1 \
         --output_dir /home/xucong24/Compiler/work_dirs/passformer_gallvm_seq2seq_v2/20260119_014052/evaluation_results \
         --max_input_length 1024 \
