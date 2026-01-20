@@ -15,7 +15,7 @@
 
 # passformer autophase train
 # python -m src.training.passformer_autophase_train --config /home/xucong24/Compiler/configs/passformer_gallvm_autophase.yaml
-python -m src.training.passformer_seq2seq_train_v2 --config /home/xucong24/Compiler/configs/passformer_gallvm_seq2seq_v2.yaml
+python -m src.training.passformer_seq2seq_train_v2 --config /home/xucong24/Compiler/configs/passformer_gallvm_seq2seq_concat.yaml
 
 
 # tokenize llvm_opti_seq dataset

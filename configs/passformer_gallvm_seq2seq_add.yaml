@@ -15,7 +15,7 @@ data:
   split_seed: 42
 
 output:
-  base_work_dir: /home/xucong24/Compiler/work_dirs/passformer_gallvm_seq2seq_v2
+  base_work_dir: /home/xucong24/Compiler/work_dirs/passformer_gallvm_seq2seq_add
 
 
 # GPT-2 Decoder 配置

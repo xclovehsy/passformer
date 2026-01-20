@@ -18,7 +18,7 @@ from transformers.utils import auto_docstring, logging
 from transformers.models.auto.configuration_auto import AutoConfig
 from transformers.models.auto.modeling_auto import AutoModel, AutoModelForCausalLM
 from .passformer_config import PassformerConfig
-from .fusion import AutophaseProjection, AutophaseCrossAttention
+from .fusion import AutophaseProjection, AutophaseCrossAttention, AutophaseConcatFusion
 from ..tokenizer import (
     Inst2VecTokenizer,
     OptiSeqTokenizer
@@ -62,13 +62,8 @@ class PassformerModel(PreTrainedModel, GenerationMixin):
         config: Optional[PretrainedConfig] = None,
         encoder: Optional[PreTrainedModel] = None,
         decoder: Optional[PreTrainedModel] = None,
+        fusion_method: Optional[str] = None,
     ):
-        r"""
-        encoder (`PreTrainedModel`, *optional*):
-            The encoder model to use.
-        decoder (`PreTrainedModel`, *optional*):
-            The decoder model to use.
-        """
         if config is None and (encoder is None or decoder is None):
             raise ValueError("Either a configuration or an encoder and a decoder has to be provided.")
         if config is None:
@@ -76,6 +71,10 @@ class PassformerModel(PreTrainedModel, GenerationMixin):
         else:
             if not isinstance(config, self.config_class):
                 raise ValueError(f"Config: {config} has to be of type {self.config_class}")
+
+        # Override config values with provided parameters (if any)
+        if fusion_method is not None:
+            config.fusion_method = fusion_method
 
         if config.decoder.cross_attention_hidden_size is not None:
             if config.decoder.cross_attention_hidden_size != config.encoder.hidden_size:
@@ -148,7 +147,20 @@ class PassformerModel(PreTrainedModel, GenerationMixin):
         if self.config.fusion_method == "add":
             # 加到 encoder 输出
             self.autophase_proj = AutophaseProjection(
-                self.config.autophase_dim, encoder_hidden_size
+                autophase_dim=self.config.autophase_dim,
+                hidden_dim=encoder_hidden_size,
+                intermediate_dim=self.config.fusion_intermediate_dim
+                
+            )
+        elif self.config.fusion_method == "concat":
+            # Concat fusion: autophase -> emb -> concat with encoder -> decoder_hidden_size
+            self.autophase_fusion = AutophaseConcatFusion(
+                autophase_dim=self.config.autophase_dim,
+                encoder_hidden_size=encoder_hidden_size,
+                decoder_hidden_size=decoder_hidden_size,
+                autophase_emb_dim=self.config.autophase_emb_dim,
+                autophase_intermediate_dim=self.config.autophase_intermediate_dim,
+                concat_intermediate_dim=self.config.concat_intermediate_dim
             )
         elif self.config.fusion_method is not None and self.config.fusion_method != "none":
             raise ValueError(f"Unknown fusion method: {self.config.fusion_method}")
@@ -179,8 +191,20 @@ class PassformerModel(PreTrainedModel, GenerationMixin):
             self.encoder._init_weights(module)
         elif module in self.decoder.modules():
             self.decoder._init_weights(module)
-        elif module in self.autophase_proj.modules():
-            # Initialize autophase modules and other custom modules
+        elif hasattr(self, 'autophase_proj') and module in self.autophase_proj.modules():
+            # Initialize autophase projection modules (for "add" method)
+            initializer_range = getattr(self.config, 'initializer_range', 0.02)
+            if isinstance(module, (nn.Linear,)):
+                # Initialize linear layers with normal distribution
+                module.weight.data.normal_(mean=0.0, std=initializer_range)
+                if module.bias is not None:
+                    module.bias.data.zero_()
+            elif isinstance(module, (nn.LayerNorm,)):
+                # Initialize layer norm
+                module.bias.data.zero_()
+                module.weight.data.fill_(1.0)
+        elif hasattr(self, 'autophase_fusion') and module in self.autophase_fusion.modules():
+            # Initialize autophase fusion modules (for "concat" method)
             initializer_range = getattr(self.config, 'initializer_range', 0.02)
             if isinstance(module, (nn.Linear,)):
                 # Initialize linear layers with normal distribution
@@ -358,17 +382,34 @@ class PassformerModel(PreTrainedModel, GenerationMixin):
         self,
         encoder_hidden_states: torch.Tensor,
         autophase: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-
+    ) -> torch.Tensor:
+        """
+        Fuse autophase features with encoder hidden states.
+        
+        Args:
+            encoder_hidden_states: [batch_size, seq_len, encoder_hidden_size]
+            autophase: [batch_size, autophase_dim]
+        
+        Returns:
+            fused_states: [batch_size, seq_len, hidden_size]
+                - For "add": same as encoder_hidden_size
+                - For "concat": decoder_hidden_size
+        """
         if autophase.dtype != torch.float32 and autophase.dtype != torch.float16:
             autophase = autophase.float()
         
-        
         if self.config.fusion_method == "add":
-            # Add autophase embedding to all positions]
-            autophase_emb = self.autophase_proj(autophase)  # [batch, 1, hidden]
+            # Add autophase embedding to all positions
+            autophase_emb = self.autophase_proj(autophase)  # [batch, 1, encoder_hidden_size]
             fused = encoder_hidden_states + autophase_emb
             return fused
+        elif self.config.fusion_method == "concat":
+            # Concat fusion: autophase -> emb -> concat -> decoder_hidden_size
+            fused = self.autophase_fusion(encoder_hidden_states, autophase)
+            return fused
+        elif self.config.fusion_method is None or self.config.fusion_method == "none":
+            # No fusion, return encoder hidden states as-is
+            return encoder_hidden_states
         else:
             raise ValueError(f"Unknown fusion method: {self.config.fusion_method}")
     
@@ -470,17 +511,24 @@ class PassformerModel(PreTrainedModel, GenerationMixin):
 
         encoder_hidden_states = encoder_outputs[0]
 
-        if autophase is None and self.config.fusion_method is not None:
+        if autophase is None and self.config.fusion_method is not None and self.config.fusion_method != "none":
             raise ValueError("Autophase is required")
 
-        encoder_hidden_states = self._fuse_autophase(encoder_hidden_states, autophase)
+        # Fuse autophase with encoder hidden states
+        # For "concat" method, this already outputs decoder_hidden_size
+        # For "add" method, this outputs encoder_hidden_size
+        fused_hidden_states = self._fuse_autophase(encoder_hidden_states, autophase)
 
-        # optionally project encoder_hidden_states
+        # Optionally project encoder_hidden_states to decoder dimension
+        # Note: For "concat" method, projection is already done in _fuse_autophase
         if (
+            self.config.fusion_method != "concat" and
             self.encoder.config.hidden_size != self.decoder.config.hidden_size
             and self.decoder.config.cross_attention_hidden_size is None
         ):
-            encoder_hidden_states = self.enc_to_dec_proj(encoder_hidden_states)
+            encoder_hidden_states = self.enc_to_dec_proj(fused_hidden_states)
+        else:
+            encoder_hidden_states = fused_hidden_states
 
         if (labels is not None) and (decoder_input_ids is None and decoder_inputs_embeds is None):
             decoder_input_ids = shift_tokens_right(
@@ -546,32 +594,32 @@ __all__ = ["PassformerModel"]
 if __name__ == "__main__": 
     from transformers import AutoModel, GPT2Config, GPT2LMHeadModel
     
-    # encoder = AutoModel.from_pretrained('D:/dev/passformer/checkpoints/final_model')
-    # config = {
-    #     "n_embd": 768,
-    #     "n_head": 12,
-    #     "n_layer": 6,
-    #     "bos_token_id": 126,
-    #     "eos_token_id": 127,
-    #     "vocab_size": 128,
-    #     "add_cross_attention": True,
-    #     "architectures": [
-    #         "GPT2LMHeadModel"
-    #     ],
-    #     "task_specific_params": {
-    #         "text-generation": {
-    #         "do_sample": True,
-    #         "max_length": 50
-    #         }
-    #     },
-    # }
+    encoder = AutoModel.from_pretrained('D:/dev/passformer/checkpoints/final_model')
+    config = {
+        "n_embd": 768,
+        "n_head": 12,
+        "n_layer": 6,
+        "bos_token_id": 126,
+        "eos_token_id": 127,
+        "vocab_size": 128,
+        "add_cross_attention": True,
+        "architectures": [
+            "GPT2LMHeadModel"
+        ],
+        "task_specific_params": {
+            "text-generation": {
+            "do_sample": True,
+            "max_length": 50
+            }
+        },
+    }
 
-    # decoder_config = GPT2Config(**config)
-    # decoder = GPT2LMHeadModel(decoder_config)
+    decoder_config = GPT2Config(**config)
+    decoder = GPT2LMHeadModel(decoder_config)
 
     # Encoder-decoder model
-    # model = PassformerModel(encoder=encoder, decoder=decoder)
-    model = PassformerModel.from_pretrained("D:/dev/passformer/checkpoints/final_model")
+    model = PassformerModel(encoder=encoder, decoder=decoder, fusion_method="concat")
+    # model = PassformerModel.from_pretrained("D:/dev/passformer/checkpoints/final_model")
     print(model)
 
     encoder_tokenizer = Inst2VecTokenizer.from_pretrained("D:/dev/passformer/checkpoints/Inst2VecTokenizer")
@@ -580,7 +628,7 @@ if __name__ == "__main__":
     with open("D:/dev/passformer/src/utils/qsort.ll", "r") as f:
         llvm = f.read()
     input_ids = encoder_tokenizer(llvm, max_length=50, return_tensors="pt")
-    labels = decoder_tokenizer("mem2reg instcombine gvn", max_length=25, return_tensors="pt")
+    labels = decoder_tokenizer("-mem2reg -instcombine -gvn", max_length=25, return_tensors="pt")
     autophase = torch.randn(1, 56)
     print(input_ids)
     print(labels)
@@ -590,5 +638,12 @@ if __name__ == "__main__":
     print(loss)
     print(logits)
 
-    print(model.generate(input_ids["input_ids"], autophase=autophase, do_sample=True))
+    print(model.generate(input_ids["input_ids"], autophase=autophase))
+
+    model.save_pretrained("D:/dev/passformer/checkpoints/test")
+    model = PassformerModel.from_pretrained("D:/dev/passformer/checkpoints/test")
+    print(model)
+    print(model.config)
+    print(model.generate(input_ids["input_ids"], autophase=autophase))
+    
     

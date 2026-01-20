@@ -37,6 +37,14 @@ class PassformerConfig(PretrainedConfig):
         self.decoder_start_token_id = kwargs.get("decoder_start_token_id", 126)
         self.pad_token_id = kwargs.get("pad_token_id", 125)
         self.vocab_size = kwargs.get("vocab_size", 128)
+        
+        # MLP intermediate dimension configuration
+        # For AutophaseProjection (add method)
+        self.fusion_intermediate_dim = kwargs.get("fusion_intermediate_dim", 256)
+        # For AutophaseConcatFusion (concat method)
+        self.autophase_intermediate_dim = kwargs.get("autophase_intermediate_dim", 256)
+        self.concat_intermediate_dim = kwargs.get("concat_intermediate_dim", 2048)
+        self.autophase_emb_dim = kwargs.get("autophase_emb_dim", 56)  # default: encoder_hidden_size
 
     @classmethod
     def from_encoder_decoder_configs(
