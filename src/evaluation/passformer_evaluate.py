@@ -10,19 +10,19 @@ import json
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from datetime import datetime
 
 import torch
 import numpy as np
 from tqdm import tqdm
 import compiler_gym
-from compiler_gym.envs.llvm import FileBenchmark
-from compiler_gym.util.runfiles_path import runfiles_path
+# from compiler_gym.envs.llvm import FileBenchmark
+# from compiler_gym.util.runfiles_path import runfiles_path
 
 from src.inference.passformer_inference import PassformerInference
 from src.config.config import load_config
-from src.utils.llvm import bitcode_to_llvm_ir
+# from src.utils.llvm import bitcode_to_llvm_ir
 
 
 @dataclass
@@ -30,37 +30,37 @@ class BenchmarkResult:
     """单个 benchmark 的评估结果"""
     benchmark: str
     benchmark_path: str
-    original_ir_count: int
-    optimized_ir_count: int
-    o3_ir_count: Optional[int] = None
-    oz_ir_count: Optional[int] = None
+    original_ir_count: int = 0
+    optimized_ir_count: int = 0
+    o3_ir_count: int = 0
+    oz_ir_count: int = 0
     pass_sequence: str = ""
     num_passes: int = 0
-    rewards: List[float] = []
+    rewards: List[float] = field(default_factory=list)
     returns: float = 0.0
     inference_time: float = 0.0
     optimization_time: float = 0.0
     total_time: float = 0.0
     success: bool = True
-    error_message: Optional[str] = None
+    error_message: str = ""
 
 
 @dataclass
 class EvaluationSummary:
     """评估结果汇总"""
-    total_benchmarks: int
-    successful_benchmarks: int
-    failed_benchmarks: int
-    avg_returns: float
-    avg_inference_time: float
-    avg_optimization_time: float
-    avg_total_time: float
+    total_benchmarks: int = 0
+    successful_benchmarks: int = 0
+    failed_benchmarks: int = 0
+    avg_returns: float = 0.0
+    avg_inference_time: float = 0.0
+    avg_optimization_time: float = 0.0
+    avg_total_time: float = 0.0
 
 
 def get_dataset_benchmarks(dataset_name: str, env=None, exclude_benchmarks: Optional[List[str]] = None) -> List[str]:
     should_close = False
     if env is None:
-        env = compiler_gym.make("llvm-v0")
+        env = compiler_gym.make("llvm-ic-v0")
         should_close = True
     
     try:
@@ -74,26 +74,26 @@ def get_dataset_benchmarks(dataset_name: str, env=None, exclude_benchmarks: Opti
             env.close()
 
 
-def find_bc_files(benchmark_dir: str, benchmarks: Optional[List[str]] = None) -> List[Tuple[str, str]]:
-    benchmark_dir = Path(benchmark_dir)
-    if not benchmark_dir.exists():
-        raise ValueError(f"Benchmark directory does not exist: {benchmark_dir}")
+# def find_bc_files(benchmark_dir: str, benchmarks: Optional[List[str]] = None) -> List[Tuple[str, str]]:
+#     benchmark_dir = Path(benchmark_dir)
+#     if not benchmark_dir.exists():
+#         raise ValueError(f"Benchmark directory does not exist: {benchmark_dir}")
     
-    bc_files = list(benchmark_dir.glob("*.bc"))
+#     bc_files = list(benchmark_dir.glob("*.bc"))
     
-    if benchmarks is not None:
-        # 过滤指定的 benchmarks
-        filtered_files = []
-        for bc_file in bc_files:
-            # 支持完整名称或简短名称匹配
-            name = bc_file.stem
-            for bm in benchmarks:
-                if bm in name or name.endswith(f"_{bm}") or name.startswith(f"{bm}_"):
-                    filtered_files.append((name, str(bc_file)))
-                    break
-        return filtered_files
+#     if benchmarks is not None:
+#         # 过滤指定的 benchmarks
+#         filtered_files = []
+#         for bc_file in bc_files:
+#             # 支持完整名称或简短名称匹配
+#             name = bc_file.stem
+#             for bm in benchmarks:
+#                 if bm in name or name.endswith(f"_{bm}") or name.startswith(f"{bm}_"):
+#                     filtered_files.append((name, str(bc_file)))
+#                     break
+#         return filtered_files
     
-    return [(bc_file.stem, str(bc_file)) for bc_file in bc_files]
+#     return [(bc_file.stem, str(bc_file)) for bc_file in bc_files]
 
 
 def create_benchmark(benchmark_uri_or_path: str):
@@ -103,18 +103,18 @@ def create_benchmark(benchmark_uri_or_path: str):
         return benchmark_uri_or_path
     else:
         # 从文件路径创建 FileBenchmark
-        return FileBenchmark(benchmark_uri_or_path)
+        # return FileBenchmark(benchmark_uri_or_path)
+        raise ValueError()
 
 
-def apply_pass_sequence(env, pass_sequence: str) -> Tuple[bool, Optional[str], List[float], float]:
-    print(f"apply_pass_sequence, step:begin, benchmark: {env.benchmark}, pass_sequence: {pass_sequence}")
-    
+def apply_pass_sequence(env, pass_sequence: str) -> Tuple[bool, Optional[str], List[float], float]:    
     if not pass_sequence or not pass_sequence.strip():
         return True, None, [], 0.0
     
     passes = pass_sequence.strip().split()
     rewards = []
     total_reward = 0.0
+    print(f"apply_pass_sequence, step:begin, benchmark: {env.benchmark}, len_passes: {len(passes)}, pass_sequence: {passes}")
     
     try:
         for pass_name in passes:
@@ -123,17 +123,20 @@ def apply_pass_sequence(env, pass_sequence: str) -> Tuple[bool, Optional[str], L
             except ValueError:
                 # Pass 不在 action space 中，跳过
                 raise ValueError(f"Pass {pass_name} not in action space")
-            
-            print(f"apply_pass_sequence, step:iter_begin, pass_name: {pass_name}")
-            
+                        
             observation, reward, done, info = env.step(action_idx)
+
+            if done:
+                break
+            print(f"benchmark: {env.benchmark}, pass_name: {pass_name}, action_idx: {action_idx}, observation: {observation}, reward: {reward}, done: {done}, info: {info}")
             total_reward += reward
-            rewards.append(reward)        
-            print(f"apply_pass_sequence, step:iter_end, pass_name: {pass_name}, reward: {reward}")
+            rewards.append(reward)      
+            print(f"benchmark: {env.benchmark}, pass_name: {pass_name}, action_idx: {action_idx}, reward: {reward}, total_reward: {total_reward}")  
 
         print(f"apply_pass_sequence, step:end, benchmark: {env.benchmark}, total_reward: {total_reward}")
         return True, None, rewards, total_reward
     except Exception as e:
+        print(f"apply_pass_sequence, step:error, benchmark: {env.benchmark}, error: {e}")
         return False, str(e), [], 0.0
 
 
@@ -176,6 +179,7 @@ def evaluate_single_benchmark(
             num_beams=num_beams,
             do_sample=do_sample,
         )
+        print(f"evaluate_single_benchmark, step:inference_end, benchmark: {env.benchmark}, pass_sequence: {pass_sequence}")
         inference_time = time.time() - inference_start
         
         # 应用优化序列
@@ -324,14 +328,14 @@ def main():
     args = parser.parse_args()
     if args.output_dir is None:
         args.output_dir = os.path.join(args.model_path, "evaluation_results")
-    
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     # 加载模型和 tokenizer
     print("正在加载模型和 tokenizer...")
     inference = PassformerInference.from_pretrained(
         model_path=args.model_path,
         encoder_tokenizer_path=args.encoder_tokenizer_path,
         decoder_tokenizer_path=args.decoder_tokenizer_path,
-        device=args.device,
+        device=device,
     )
     print("模型加载完成")
     
@@ -341,10 +345,11 @@ def main():
     
     if args.datasets:
         print(f"正在从 datasets '{args.datasets}' 获取 benchmarks...")
-        temp_env = compiler_gym.make("llvm-v0")
+        temp_env = compiler_gym.make("llvm-ic-v0")
         try:
-            benchmark_uris = get_dataset_benchmarks(args.dataset, temp_env)
+            benchmark_uris = get_dataset_benchmarks(args.datasets, temp_env)
             print(f"datasets '{args.datasets}' 包含 {len(benchmark_uris)} 个 benchmark")
+            benchmark_list = [(benchmark_uris[i], benchmark_uris[i]) for i in range(len(benchmark_uris))]
         except Exception as e:
             print(f"错误: 无法从 datasets '{args.datasets}' 获取 benchmarks: {e}")
             temp_env.close()
@@ -353,7 +358,8 @@ def main():
             temp_env.close()
     else:
         # 从文件目录获取
-        benchmark_list = find_bc_files(args.benchmark_dir)
+        # benchmark_list = find_bc_files(args.benchmark_dir)
+        print(f"从文件目录 '{args.benchmark_dir}' 获取 benchmarks... TODO")
     
     print(f"共找到 {len(benchmark_list)} 个 benchmark")
     
@@ -363,7 +369,7 @@ def main():
     
     # 创建 CompilerGym 环境
     print("\n创建 CompilerGym 环境...")
-    env = compiler_gym.make("llvm-v0")
+    env = compiler_gym.make("llvm-ic-v0")
     
     # 评估每个 benchmark
     print("\n开始评估...")
@@ -398,3 +404,14 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+"""
+python -m src.evaluation.passformer_evaluate \
+        --model_path /home/xucong24/Compiler/work_dirs/passformer_gallvm_seq2seq_v2/20260119_014052/checkpoint-10980 \
+        --encoder_tokenizer_path /home/xucong24/Compiler/checkpoints/Inst2VecTokenizer \
+        --decoder_tokenizer_path /home/xucong24/Compiler/checkpoints/OptiSeqTokenizer \
+        --datasets cbench-v1 \
+        --output_dir /home/xucong24/Compiler/work_dirs/passformer_gallvm_seq2seq_v2/20260119_014052/evaluation_results \
+        --max_input_length 1024 \
+        --max_output_length 32
+"""
