@@ -119,3 +119,4 @@ logs/
 nohup.out
 
 trainer_output/
+third_party/
