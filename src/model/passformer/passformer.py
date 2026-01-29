@@ -594,38 +594,38 @@ __all__ = ["PassformerModel"]
 if __name__ == "__main__": 
     from transformers import AutoModel, GPT2Config, GPT2LMHeadModel
     
-    encoder = AutoModel.from_pretrained('D:/dev/passformer/checkpoints/final_model')
-    config = {
-        "n_embd": 768,
-        "n_head": 12,
-        "n_layer": 6,
-        "bos_token_id": 126,
-        "eos_token_id": 127,
-        "vocab_size": 128,
-        "add_cross_attention": True,
-        "architectures": [
-            "GPT2LMHeadModel"
-        ],
-        "task_specific_params": {
-            "text-generation": {
-            "do_sample": True,
-            "max_length": 50
-            }
-        },
-    }
+    # encoder = AutoModel.from_pretrained('D:/dev/passformer/checkpoints/final_model')
+    # config = {
+    #     "n_embd": 768,
+    #     "n_head": 12,
+    #     "n_layer": 6,
+    #     "bos_token_id": 126,
+    #     "eos_token_id": 127,
+    #     "vocab_size": 128,
+    #     "add_cross_attention": True,
+    #     "architectures": [
+    #         "GPT2LMHeadModel"
+    #     ],
+    #     "task_specific_params": {
+    #         "text-generation": {
+    #         "do_sample": True,
+    #         "max_length": 50
+    #         }
+    #     },
+    # }
 
-    decoder_config = GPT2Config(**config)
-    decoder = GPT2LMHeadModel(decoder_config)
+    # decoder_config = GPT2Config(**config)
+    # decoder = GPT2LMHeadModel(decoder_config)
 
     # Encoder-decoder model
-    model = PassformerModel(encoder=encoder, decoder=decoder, fusion_method="concat")
-    # model = PassformerModel.from_pretrained("D:/dev/passformer/checkpoints/final_model")
+    # model = PassformerModel(encoder=encoder, decoder=decoder, fusion_method="concat")
+    model = PassformerModel.from_pretrained("/home/xucong24/Compiler/work_dirs/passformer_gallvm_seq2seq_concat/20260120_195517/checkpoint-15555")
     print(model)
 
-    encoder_tokenizer = Inst2VecTokenizer.from_pretrained("D:/dev/passformer/checkpoints/Inst2VecTokenizer")
-    decoder_tokenizer = OptiSeqTokenizer.from_pretrained("D:/dev/passformer/checkpoints/OptiSeqTokenizer")
+    encoder_tokenizer = Inst2VecTokenizer.from_pretrained("/home/xucong24/Compiler/checkpoints/Inst2VecTokenizer")
+    decoder_tokenizer = OptiSeqTokenizer.from_pretrained("/home/xucong24/Compiler/checkpoints/OptiSeqTokenizer")
 
-    with open("D:/dev/passformer/src/utils/qsort.ll", "r") as f:
+    with open("/home/xucong24/Compiler/tmp/37902.ll", "r") as f:
         llvm = f.read()
     input_ids = encoder_tokenizer(llvm, max_length=50, return_tensors="pt")
     labels = decoder_tokenizer("-mem2reg -instcombine -gvn", max_length=25, return_tensors="pt")
