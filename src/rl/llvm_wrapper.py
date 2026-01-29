@@ -99,3 +99,6 @@ class llvm_wrapper(gym.Env):
             return np.concatenate((self.env.reset(), np.array([self.max_steps])))
         else:
             return self.env.reset()
+
+
+if __name__
