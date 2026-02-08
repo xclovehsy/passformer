@@ -1,0 +1,25 @@
+model:
+  model_id: "/home/xucong24/Compiler/work_dirs/passformer_gallvm_seq2seq_concat/20260120_195517/final_model"
+  encoder_tokenizer_id: "/home/xucong24/Compiler/checkpoints/Inst2VecTokenizer"
+  decoder_tokenizer_id: "/home/xucong24/Compiler/checkpoints/OptiSeqTokenizer"
+
+data:
+  bc_files: 
+    - "/home/xucong24/Compiler/datasets/cbench-v1/benchmark_cbench-v1_sha.bc"
+  max_length: 512
+
+rl:
+  num_generations: 16
+  max_gen_length: 20
+  beta: 0.04
+  eps: 0.2
+  temperature: 0.8
+
+output:
+  base_work_dir: "/home/xucong24/Compiler/work_dirs/grpo_train"
+
+training:
+  learning_rate: 0.0000001
+  batch_size: 2
+  epochs: 100
+  save_steps: 50

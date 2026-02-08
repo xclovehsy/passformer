@@ -15,7 +15,7 @@
 
 # passformer autophase train
 # python -m src.training.passformer_autophase_train --config /home/xucong24/Compiler/configs/passformer_gallvm_autophase.yaml
-python -m src.training.passformer_seq2seq_train_v2 --config /home/xucong24/Compiler/configs/passformer_gallvm_seq2seq_add.yaml
+# python -m src.training.passformer_seq2seq_train_v2 --config /home/xucong24/Compiler/configs/passformer_gallvm_seq2seq_add.yaml
 
 
 # tokenize llvm_opti_seq dataset
@@ -69,3 +69,6 @@ python -m src.training.passformer_seq2seq_train_v2 --config /home/xucong24/Compi
 #     --decoder_path /home/xucong24/Compiler/checkpoints/gpt2 \
 #     --test_fusion_method decoder_prefix
 #     --device cpu
+
+# rl
+python -m src.rl.train --config /home/xucong24/Compiler/configs/grpo.yaml
