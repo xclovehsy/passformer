@@ -1,0 +1,29 @@
+model:
+  model_id: "/home/xucong24/Compiler/work_dirs/passformer_gallvm_seq2seq_concat/20260120_195517/final_model"
+  encoder_tokenizer_id: "/home/xucong24/Compiler/checkpoints/Inst2VecTokenizer"
+  decoder_tokenizer_id: "/home/xucong24/Compiler/checkpoints/OptiSeqTokenizer"
+
+data:
+  bc_files:
+    - "/home/xucong24/Compiler/datasets/cbench-v1/benchmark_cbench-v1_sha.bc"
+  max_length: 512
+
+rl:
+  num_rollouts: 8          # K: number of sequences sampled per input
+  max_gen_length: 20       # max decoder sequence length (incl. start token)
+  temperature: 0.7         # sampling temperature
+  gamma: 0.99              # discount factor for returns
+  entropy_coeff: 0.01      # entropy bonus weight (encourage exploration)
+  kl_coeff: 0.0            # KL penalty against reference model (0 = off)
+  max_grad_norm: 1.0       # gradient clipping
+  reward_norm: true        # normalise advantages
+
+output:
+  base_work_dir: "/home/xucong24/Compiler/work_dirs/reinforce_train"
+
+training:
+  learning_rate: 5e-6
+  batch_size: 2
+  epochs: 100
+  save_steps: 50
+  log_steps: 1

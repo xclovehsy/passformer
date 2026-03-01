@@ -71,4 +71,5 @@
 #     --device cpu
 
 # rl
-python -m src.rl.train --config /home/xucong24/Compiler/configs/grpo.yaml
+# python -m src.rl.train --config /home/xucong24/Compiler/configs/grpo.yaml
+python -m src.reinforce.train --config /home/xucong24/Compiler/configs/reinforce.yaml

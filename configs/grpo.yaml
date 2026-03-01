@@ -13,13 +13,13 @@ rl:
   max_gen_length: 20
   beta: 0.04
   eps: 0.2
-  temperature: 0.8
+  temperature: 0.7
 
 output:
   base_work_dir: "/home/xucong24/Compiler/work_dirs/grpo_train"
 
 training:
-  learning_rate: 0.0000001
+  learning_rate: 5e-6
   batch_size: 2
   epochs: 100
   save_steps: 50
