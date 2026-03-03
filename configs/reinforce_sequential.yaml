@@ -11,7 +11,6 @@ data:
     - "/home/xucong24/Compiler/datasets/cbench-v1/benchmark_cbench-v1_bzip2.bc"
     - "/home/xucong24/Compiler/datasets/cbench-v1/benchmark_cbench-v1_crc32.bc"
     - "/home/xucong24/Compiler/datasets/cbench-v1/benchmark_cbench-v1_dijkstra.bc"
-    # - "/home/xucong24/Compiler/datasets/cbench-v1/benchmark_cbench-v1_ghostscript.bc"
     - "/home/xucong24/Compiler/datasets/cbench-v1/benchmark_cbench-v1_gsm.bc"
     - "/home/xucong24/Compiler/datasets/cbench-v1/benchmark_cbench-v1_ispell.bc"
     - "/home/xucong24/Compiler/datasets/cbench-v1/benchmark_cbench-v1_jpeg-c.bc"
@@ -31,21 +30,25 @@ data:
   max_length: 512
 
 rl:
-  num_rollouts: 8          # K: number of sequences sampled per input
-  max_gen_length: 20       # max decoder sequence length (incl. start token)
-  temperature: 0.7         # sampling temperature
-  gamma: 0.99              # discount factor for returns
-  entropy_coeff: 0.01      # entropy bonus weight (encourage exploration)
-  kl_coeff: 0.0            # KL penalty against reference model (0 = off)
-  max_grad_norm: 1.0       # gradient clipping
-  reward_norm: true        # normalise advantages
+  num_rollouts: 8
+  max_gen_length: 20
+  temperature: 0.7
+  gamma: 0.99
+  entropy_coeff: 0.01
+  kl_coeff: 0.0
+  max_grad_norm: 1.0
+  reward_norm: true
 
 output:
-  base_work_dir: "/home/xucong24/Compiler/work_dirs/reinforce_train"
+  base_work_dir: "/home/xucong24/Compiler/work_dirs/reinforce_sequential"
 
 training:
   learning_rate: 5e-6
-  batch_size: 2
-  epochs: 100
+  batch_size: 1
+  epochs_per_benchmark: 50     # 每个 benchmark 最多训练的 epoch 数
+  reward_threshold: 10        # 平均 reward 达到此值则提前切换到下一个 benchmark
+  patience: 100                  # 连续多少个 epoch reward 没有提升则提前切换
+  replay_ratio: 0.0            # 每训练一个 benchmark 后，回放已训练 benchmark 的概率
+  replay_epochs: 2             # 每次回放轮数
   save_steps: 50
   log_steps: 1

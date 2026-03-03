@@ -117,7 +117,6 @@ class REINFORCETrainer:
         total_rewards : FloatTensor [N]
         """
         gen_tokens = sequences[:, 1:]  # drop decoder_start_token
-        print("gen_tokens: ", gen_tokens)
         N, gen_len = gen_tokens.shape
 
         all_rewards: List[List[float]] = []
@@ -131,12 +130,9 @@ class REINFORCETrainer:
                 env = llvm_wrapper([bc_path], is_from_bc=True)
                 env.reset()
                 flags = list(env.action_space.flags)
-                print("flags: ", flags)
 
                 for token_id in gen_tokens[i].tolist():
-                    print(token_id)
-                    print(self.special_ids)
-                    if token_id in self.special_ids:
+                    if token_id in self.special_ids and token_id != 126:
                         break
                     pass_flag = self.dec_tok.ids_to_tokens.get(token_id)
                     if pass_flag is None or pass_flag not in flags:
@@ -208,8 +204,6 @@ class REINFORCETrainer:
 
         # ---- rollout ----
         sequences, enc_inputs = self.rollout(batch)
-        print("sequences: ", sequences)
-        print("enc_inputs: ", enc_inputs)
 
         # ---- masks & tokens ----
         gen_tokens = sequences[:, 1:]
@@ -280,6 +274,11 @@ class REINFORCETrainer:
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
         self.optimizer.step()
 
+        # best commandline: decode the sequence with max total reward
+        best_idx = total_rewards.argmax().item()
+        best_seq = sequences[best_idx : best_idx + 1]
+        best_commandline = self.dec_tok.decode(best_seq.squeeze(0), skip_special_tokens=True)
+
         return {
             "loss": total_loss.item(),
             "policy_loss": policy_loss.item(),
@@ -288,4 +287,5 @@ class REINFORCETrainer:
             "reward_mean": total_rewards.mean().item(),
             "reward_max": total_rewards.max().item(),
             "seq_len_mean": masks.sum(dim=-1).mean().item(),
+            "best_commandline": best_commandline,
         }

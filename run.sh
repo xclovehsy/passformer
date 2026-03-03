@@ -72,4 +72,5 @@
 
 # rl
 # python -m src.rl.train --config /home/xucong24/Compiler/configs/grpo.yaml
-python -m src.reinforce.train --config /home/xucong24/Compiler/configs/reinforce.yaml
+# python -m src.reinforce.train --config /home/xucong24/Compiler/configs/reinforce.yaml
+python -m src.reinforce.train_sequential --config /home/xucong24/Compiler/configs/reinforce_sequential.yaml
