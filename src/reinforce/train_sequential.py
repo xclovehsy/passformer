@@ -107,7 +107,8 @@ def main():
         for epoch in pbar:
             metrics = trainer.train_step(batch)
             global_step += 1
-            mean_reward = metrics["reward_max"]
+            mean_reward = metrics["reward_mean"]
+            max_reward = metrics["reward_max"]
 
             pbar.set_postfix({
                 "loss": f"{metrics['loss']:.4f}",
@@ -125,8 +126,8 @@ def main():
                 trainer.model.save_pretrained(ckpt)
                 logger.info(f"Checkpoint saved: {ckpt}")
 
-            if mean_reward > best_reward:
-                best_reward = mean_reward
+            if max_reward > best_reward:
+                best_reward = max_reward
                 best_commandline = metrics.get("best_commandline", "")
                 no_improve_count = 0
             else:

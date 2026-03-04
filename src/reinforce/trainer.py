@@ -3,6 +3,7 @@ import copy
 import torch
 import torch.nn.functional as F
 from typing import Dict, List, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from src.rl.llvm_wrapper import llvm_wrapper
 
@@ -37,12 +38,19 @@ class REINFORCETrainer:
         rl = cfg["rl"]
         self.num_rollouts = int(rl.get("num_rollouts", 8))
         self.max_gen_length = int(rl.get("max_gen_length", 20))
-        self.temperature = float(rl.get("temperature", 0.7))
         self.gamma = float(rl.get("gamma", 0.99))
+
+        temps = rl.get("temperatures", None)
+        if temps and isinstance(temps, list) and len(temps) > 1:
+            self.temperatures = [float(t) for t in temps]
+        else:
+            self.temperatures = [float(rl.get("temperature", 0.7))]
+        self._assign_rollout_splits()
         self.entropy_coeff = float(rl.get("entropy_coeff", 0.01))
         self.kl_coeff = float(rl.get("kl_coeff", 0.0))
         self.max_grad_norm = float(rl.get("max_grad_norm", 1.0))
         self.reward_norm = rl.get("reward_norm", True)
+        self.num_reward_workers = int(rl.get("num_reward_workers", self.num_rollouts))
 
         self.pad_id = dec_tok.pad_token_id
         self.eos_id = dec_tok.eos_token_id
@@ -55,11 +63,24 @@ class REINFORCETrainer:
         )
 
     # ------------------------------------------------------------------
+    # helpers
+    # ------------------------------------------------------------------
+    def _assign_rollout_splits(self):
+        """Evenly distribute num_rollouts across temperatures."""
+        n_temps = len(self.temperatures)
+        base, remainder = divmod(self.num_rollouts, n_temps)
+        self.rollout_splits = [base + (1 if i < remainder else 0)
+                               for i in range(n_temps)]
+
+    # ------------------------------------------------------------------
     # 1. Rollout
     # ------------------------------------------------------------------
     @torch.no_grad()
     def rollout(self, batch):
-        """Sample sequences from the current policy.
+        """Sample sequences with mixed temperatures.
+
+        Each temperature group generates a subset of rollouts.
+        Results are concatenated so downstream code sees [B*K, L] as before.
 
         Returns
         -------
@@ -82,16 +103,59 @@ class REINFORCETrainer:
         exp_mask = inputs["attention_mask"].repeat_interleave(K, dim=0)
         exp_auto = autophases.repeat_interleave(K, dim=0)
 
-        sequences = self.model.generate(
-            input_ids=exp_ids,
-            attention_mask=exp_mask,
-            autophase=exp_auto,
-            max_length=self.max_gen_length,
-            do_sample=True,
-            temperature=self.temperature,
-            pad_token_id=self.pad_id,
-            eos_token_id=self.eos_id,
-        )
+        if len(self.temperatures) == 1:
+            sequences = self.model.generate(
+                input_ids=exp_ids,
+                attention_mask=exp_mask,
+                autophase=exp_auto,
+                max_length=self.max_gen_length,
+                do_sample=True,
+                temperature=self.temperatures[0],
+                pad_token_id=self.pad_id,
+                eos_token_id=self.eos_id,
+            )
+        else:
+            B = inputs["input_ids"].shape[0]
+            seq_groups = []
+            for temp, count in zip(self.temperatures, self.rollout_splits):
+                if count == 0:
+                    continue
+                grp_ids = inputs["input_ids"].repeat_interleave(count, dim=0)
+                grp_mask = inputs["attention_mask"].repeat_interleave(count, dim=0)
+                grp_auto = autophases.repeat_interleave(count, dim=0)
+                grp_seq = self.model.generate(
+                    input_ids=grp_ids,
+                    attention_mask=grp_mask,
+                    autophase=grp_auto,
+                    max_length=self.max_gen_length,
+                    do_sample=True,
+                    temperature=temp,
+                    pad_token_id=self.pad_id,
+                    eos_token_id=self.eos_id,
+                )
+                seq_groups.append(grp_seq)
+
+            max_len = max(s.shape[1] for s in seq_groups)
+            padded = []
+            for s in seq_groups:
+                if s.shape[1] < max_len:
+                    pad = torch.full(
+                        (s.shape[0], max_len - s.shape[1]),
+                        self.pad_id, dtype=s.dtype, device=s.device,
+                    )
+                    s = torch.cat([s, pad], dim=1)
+                padded.append(s)
+
+            if B == 1:
+                sequences = torch.cat(padded, dim=0)
+            else:
+                interleaved = []
+                for b in range(B):
+                    offset = 0
+                    for grp_idx, count in enumerate(self.rollout_splits):
+                        interleaved.append(padded[grp_idx][b * count : (b + 1) * count])
+                        offset += count
+                sequences = torch.cat(interleaved, dim=0)
 
         enc_inputs = {
             "input_ids": exp_ids,
@@ -103,8 +167,49 @@ class REINFORCETrainer:
     # ------------------------------------------------------------------
     # 2. Per-step reward
     # ------------------------------------------------------------------
+    def _eval_single_rollout(self, token_ids: List[int], bc_path: str,
+                             gen_len: int) -> List[float]:
+        """Evaluate one rollout sequence against the LLVM environment.
+
+        Thread-safe: each call creates its own env instance.
+        """
+        seq_rewards: List[float] = []
+        env = None
+        try:
+            env = llvm_wrapper([bc_path], is_from_bc=True)
+            env.reset()
+            flag_to_id = {f: i for i, f in enumerate(env.action_space.flags)}
+
+            for token_id in token_ids:
+                if token_id in self.special_ids and token_id != 126:
+                    break
+                pass_flag = self.dec_tok.ids_to_tokens.get(token_id)
+                if pass_flag is None or pass_flag not in flag_to_id:
+                    seq_rewards.append(0.0)
+                    continue
+                _, reward, done, _ = env.env.step(flag_to_id[pass_flag])
+                seq_rewards.append(float(reward))
+                if done:
+                    break
+        except Exception as e:
+            self.logger.warning(f"Rollout eval failed for {bc_path}: {e}")
+            if not seq_rewards:
+                seq_rewards.append(0.0)
+        finally:
+            if env is not None:
+                try:
+                    env.close()
+                except Exception:
+                    pass
+
+        seq_rewards = seq_rewards[:gen_len]
+        seq_rewards += [0.0] * (gen_len - len(seq_rewards))
+        return seq_rewards
+
     def compute_step_rewards(self, sequences, bc_paths):
         """Execute each generated pass one-by-one and record per-step reward.
+
+        Uses a thread pool to evaluate rollouts in parallel.
 
         Parameters
         ----------
@@ -116,42 +221,22 @@ class REINFORCETrainer:
         step_rewards  : FloatTensor [N, gen_len]
         total_rewards : FloatTensor [N]
         """
-        gen_tokens = sequences[:, 1:]  # drop decoder_start_token
+        gen_tokens = sequences[:, 1:]
         N, gen_len = gen_tokens.shape
+        token_lists = gen_tokens.tolist()
 
-        all_rewards: List[List[float]] = []
+        all_rewards: List[Optional[List[float]]] = [None] * N
 
-        for i in range(N):
-            bc_idx = i // self.num_rollouts
-            bc_path = bc_paths[bc_idx]
+        with ThreadPoolExecutor(max_workers=self.num_reward_workers) as pool:
+            futures = {}
+            for i in range(N):
+                bc_path = bc_paths[i // self.num_rollouts]
+                fut = pool.submit(self._eval_single_rollout,
+                                  token_lists[i], bc_path, gen_len)
+                futures[fut] = i
 
-            seq_rewards: List[float] = []
-            try:
-                env = llvm_wrapper([bc_path], is_from_bc=True)
-                env.reset()
-                flags = list(env.action_space.flags)
-
-                for token_id in gen_tokens[i].tolist():
-                    if token_id in self.special_ids and token_id != 126:
-                        break
-                    pass_flag = self.dec_tok.ids_to_tokens.get(token_id)
-                    if pass_flag is None or pass_flag not in flags:
-                        seq_rewards.append(0.0)
-                        continue
-                    action_id = flags.index(pass_flag)
-                    _, reward, done, _ = env.env.step(action_id)
-                    seq_rewards.append(float(reward))
-                    if done:
-                        break
-                env.close()
-            except Exception:
-                if not seq_rewards:
-                    seq_rewards.append(0.0)
-
-            # pad / truncate to gen_len
-            seq_rewards = seq_rewards[:gen_len]
-            seq_rewards += [0.0] * (gen_len - len(seq_rewards))
-            all_rewards.append(seq_rewards)
+            for fut in as_completed(futures):
+                all_rewards[futures[fut]] = fut.result()
 
         step_rewards = torch.tensor(all_rewards, device=self.device, dtype=torch.float32)
         total_rewards = step_rewards.sum(dim=-1)

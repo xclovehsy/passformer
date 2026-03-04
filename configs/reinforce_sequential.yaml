@@ -30,9 +30,12 @@ data:
   max_length: 512
 
 rl:
-  num_rollouts: 8
-  max_gen_length: 20
-  temperature: 0.7
+  # num_rollouts: 8
+  max_gen_length: 32
+  num_rollouts: 16
+  num_reward_workers: 16
+  temperatures: [0.3, 0.5, 0.7, 1.0]   # 低温(利用) / 中温(平衡) / 高温(探索)
+  # temperature: 0.7    
   gamma: 0.99
   entropy_coeff: 0.01
   kl_coeff: 0.0
@@ -45,7 +48,7 @@ output:
 training:
   learning_rate: 5e-6
   batch_size: 1
-  epochs_per_benchmark: 50     # 每个 benchmark 最多训练的 epoch 数
+  epochs_per_benchmark: 200     # 每个 benchmark 最多训练的 epoch 数
   reward_threshold: 10        # 平均 reward 达到此值则提前切换到下一个 benchmark
   patience: 100                  # 连续多少个 epoch reward 没有提升则提前切换
   replay_ratio: 0.0            # 每训练一个 benchmark 后，回放已训练 benchmark 的概率
