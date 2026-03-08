@@ -8,17 +8,17 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from src.rl.llvm_wrapper import llvm_wrapper
 
 
-class REINFORCETrainer:
+class PPOTrainer:
     """
-    REINFORCE with per-step reward for Passformer.
+    PPO (Proximal Policy Optimization) with per-step reward for Passformer.
 
-    Key differences from GRPO:
-    1. Per-step (per-pass) reward via env.step(), enabling fine-grained credit assignment.
-    2. Discounted returns for each timestep, not a single sequence-level reward.
-    3. Mean return across rollouts as baseline for variance reduction.
-    4. Optional entropy bonus and KL penalty against reference model.
-
-    Reference: CompilerDream (REINFORCE actor gradient on imagined trajectories).
+    Improvements over REINFORCE:
+    1. Clipped surrogate objective prevents destructively large policy updates.
+    2. Multiple optimization epochs per rollout for better sample efficiency.
+    3. Approximate KL-based early stopping within PPO epochs.
+    4. Per-step (per-pass) reward via env.step() for fine-grained credit assignment.
+    5. Discounted returns with mean-rollout baseline for variance reduction.
+    6. Optional entropy bonus and KL penalty against reference model.
     """
 
     def __init__(self, cfg, model, enc_tok, dec_tok, logger, work_dir):
@@ -51,6 +51,10 @@ class REINFORCETrainer:
         self.max_grad_norm = float(rl.get("max_grad_norm", 1.0))
         self.reward_norm = rl.get("reward_norm", True)
         self.num_reward_workers = int(rl.get("num_reward_workers", self.num_rollouts))
+
+        self.ppo_epochs = int(rl.get("ppo_epochs", 4))
+        self.ppo_clip_eps = float(rl.get("ppo_clip_eps", 0.2))
+        self.target_kl = float(rl.get("target_kl", 0.02))
 
         self.pad_id = dec_tok.pad_token_id
         self.eos_id = dec_tok.eos_token_id
@@ -278,12 +282,13 @@ class REINFORCETrainer:
         return advantages
 
     # ------------------------------------------------------------------
-    # 5. Full training step
+    # 5. Full training step (PPO)
     # ------------------------------------------------------------------
     def train_step(self, batch) -> Dict[str, float]:
-        """One REINFORCE update.
+        """One PPO update.
 
-        Flow: rollout → per-step rewards → returns → advantages → policy loss.
+        Flow: rollout → per-step rewards → returns → advantages
+              → compute old log-probs → multi-epoch clipped PPO updates.
         """
         bc_paths = batch["bc_path"]
 
@@ -307,35 +312,29 @@ class REINFORCETrainer:
         returns = self.compute_returns(step_rewards, masks)
         advantages = self.compute_advantages(returns, masks, total_rewards)
 
-        # ---- forward pass with gradient ----
-        self.model.train()
+        # ---- decoder inputs (shared across PPO epochs) ----
         decoder_input_ids = sequences[:, :-1]
         decoder_attention_mask = (decoder_input_ids != self.pad_id).long()
-
-        outputs = self.model(
-            input_ids=enc_inputs["input_ids"],
-            attention_mask=enc_inputs["attention_mask"],
-            autophase=enc_inputs["autophase"],
-            decoder_input_ids=decoder_input_ids,
-            decoder_attention_mask=decoder_attention_mask,
-            return_dict=True,
-        )
-        logits = outputs.logits  # [N, gen_len, V]
-        log_probs = F.log_softmax(logits, dim=-1)
-        token_lp = log_probs.gather(2, gen_tokens.unsqueeze(-1)).squeeze(-1)  # [N, gen_len]
-
         valid = masks.sum().clamp(min=1)
 
-        # REINFORCE policy loss
-        policy_loss = -(token_lp * advantages.detach() * masks).sum() / valid
+        # ---- old log-probs from rollout policy (frozen) ----
+        with torch.no_grad():
+            self.model.eval()
+            old_outputs = self.model(
+                input_ids=enc_inputs["input_ids"],
+                attention_mask=enc_inputs["attention_mask"],
+                autophase=enc_inputs["autophase"],
+                decoder_input_ids=decoder_input_ids,
+                decoder_attention_mask=decoder_attention_mask,
+                return_dict=True,
+            )
+            old_log_probs = F.log_softmax(old_outputs.logits, dim=-1)
+            old_token_lp = old_log_probs.gather(
+                2, gen_tokens.unsqueeze(-1)
+            ).squeeze(-1)  # [N, gen_len]
 
-        # entropy bonus (encourage exploration)
-        ent = -(F.softmax(logits, dim=-1) * log_probs).sum(dim=-1)
-        entropy_bonus = (ent * masks).sum() / valid
-        entropy_loss = -self.entropy_coeff * entropy_bonus
-
-        # KL penalty against reference model
-        kl_loss = torch.tensor(0.0, device=self.device)
+        # ---- ref model log-probs (if KL penalty is used) ----
+        ref_token_lp = None
         if self.kl_coeff > 0:
             with torch.no_grad():
                 ref_out = self.ref_model(
@@ -347,30 +346,115 @@ class REINFORCETrainer:
                     return_dict=True,
                 )
                 ref_lp = F.log_softmax(ref_out.logits, dim=-1)
-                ref_token_lp = ref_lp.gather(2, gen_tokens.unsqueeze(-1)).squeeze(-1)
-            kl = torch.exp(ref_token_lp - token_lp) - (ref_token_lp - token_lp) - 1
-            kl_loss = self.kl_coeff * (kl * masks).sum() / valid
+                ref_token_lp = ref_lp.gather(
+                    2, gen_tokens.unsqueeze(-1)
+                ).squeeze(-1)
 
-        total_loss = policy_loss + entropy_loss + kl_loss
+        # ---- PPO multi-epoch updates ----
+        last_metrics: Dict[str, float] = {}
+        adv_detached = advantages.detach()
 
-        # ---- update ----
-        self.optimizer.zero_grad()
-        total_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
-        self.optimizer.step()
+        for ppo_ep in range(self.ppo_epochs):
+            self.model.train()
+            outputs = self.model(
+                input_ids=enc_inputs["input_ids"],
+                attention_mask=enc_inputs["attention_mask"],
+                autophase=enc_inputs["autophase"],
+                decoder_input_ids=decoder_input_ids,
+                decoder_attention_mask=decoder_attention_mask,
+                return_dict=True,
+            )
+            logits = outputs.logits  # [N, gen_len, V]
+            log_probs = F.log_softmax(logits, dim=-1)
+            token_lp = log_probs.gather(
+                2, gen_tokens.unsqueeze(-1)
+            ).squeeze(-1)
 
-        # best commandline: decode the sequence with max total reward
+            # PPO clipped surrogate objective
+            ratio = torch.exp(token_lp - old_token_lp.detach())
+            surr1 = ratio * adv_detached
+            surr2 = torch.clamp(
+                ratio, 1.0 - self.ppo_clip_eps, 1.0 + self.ppo_clip_eps
+            ) * adv_detached
+            policy_loss = -(torch.min(surr1, surr2) * masks).sum() / valid
+
+            # entropy bonus
+            ent = -(F.softmax(logits, dim=-1) * log_probs).sum(dim=-1)
+            entropy_bonus = (ent * masks).sum() / valid
+            entropy_loss = -self.entropy_coeff * entropy_bonus
+
+            # KL penalty against reference model
+            kl_loss = torch.tensor(0.0, device=self.device)
+            if self.kl_coeff > 0 and ref_token_lp is not None:
+                kl = (torch.exp(ref_token_lp - token_lp)
+                      - (ref_token_lp - token_lp) - 1)
+                kl_loss = self.kl_coeff * (kl * masks).sum() / valid
+
+            total_loss = policy_loss + entropy_loss + kl_loss
+
+            self.optimizer.zero_grad()
+            total_loss.backward()
+            torch.nn.utils.clip_grad_norm_(
+                self.model.parameters(), self.max_grad_norm
+            )
+            self.optimizer.step()
+
+            # PPO diagnostics
+            with torch.no_grad():
+                clip_frac = (
+                    (ratio - 1.0).abs() > self.ppo_clip_eps
+                ).float().mean().item()
+                approx_kl = (
+                    (ratio - 1.0) - torch.log(ratio)
+                ).mean().item()
+
+            last_metrics = {
+                "loss": total_loss.item(),
+                "policy_loss": policy_loss.item(),
+                "entropy": entropy_bonus.item(),
+                "kl": kl_loss.item(),
+                "clip_frac": clip_frac,
+                "approx_kl": approx_kl,
+                "ppo_epochs_actual": ppo_ep + 1,
+            }
+
+            if approx_kl > self.target_kl:
+                self.logger.info(
+                    f"  PPO early stop at epoch {ppo_ep + 1}/{self.ppo_epochs} "
+                    f"(approx_kl={approx_kl:.4f} > target={self.target_kl})"
+                )
+                break
+
+        # best commandline
         best_idx = total_rewards.argmax().item()
         best_seq = sequences[best_idx : best_idx + 1]
-        best_commandline = self.dec_tok.decode(best_seq.squeeze(0), skip_special_tokens=True)
+        best_commandline = self.dec_tok.decode(
+            best_seq.squeeze(0), skip_special_tokens=True
+        )
 
-        return {
-            "loss": total_loss.item(),
-            "policy_loss": policy_loss.item(),
-            "entropy": entropy_bonus.item(),
-            "kl": kl_loss.item(),
+        last_metrics.update({
             "reward_mean": total_rewards.mean().item(),
             "reward_max": total_rewards.max().item(),
             "seq_len_mean": masks.sum(dim=-1).mean().item(),
             "best_commandline": best_commandline,
-        }
+        })
+
+        if len(self.temperatures) > 1:
+            B = len(bc_paths)
+            offset = 0
+            for temp, count in zip(self.temperatures, self.rollout_splits):
+                grp_rewards = []
+                for b in range(B):
+                    start = b * self.num_rollouts + offset
+                    end = start + count
+                    grp_rewards.append(total_rewards[start:end])
+                grp = torch.cat(grp_rewards)
+                tag = f"t{temp:.1f}"
+                last_metrics[f"reward_mean_{tag}"] = grp.mean().item()
+                last_metrics[f"reward_max_{tag}"] = grp.max().item()
+                offset += count
+
+        return last_metrics
+
+
+REINFORCETrainer = PPOTrainer

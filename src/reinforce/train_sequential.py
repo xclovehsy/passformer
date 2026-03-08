@@ -8,7 +8,7 @@ import argparse
 from datetime import datetime
 from tqdm import tqdm
 
-from src.reinforce.trainer import REINFORCETrainer
+from src.reinforce.trainer import PPOTrainer
 from src.rl.llvm_wrapper import llvm_wrapper
 from src.model import PassformerModel, Inst2VecTokenizer, OptiSeqTokenizer
 from src.config import load_config
@@ -70,7 +70,7 @@ def main():
     logger.info("Model and tokenizers loaded")
 
     # ---- trainer ----
-    trainer = REINFORCETrainer(cfg, model, enc_tok, dec_tok, logger, work_dir)
+    trainer = PPOTrainer(cfg, model, enc_tok, dec_tok, logger, work_dir)
 
     # ---- sequential training params ----
     bc_files = cfg["data"]["bc_files"]
