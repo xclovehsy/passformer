@@ -1,0 +1,35 @@
+model:
+  model_id: "/home/xucong24/Compiler/work_dirs/passformer_gallvm_seq2seq_concat/20260120_195517/final_model"
+  encoder_tokenizer_id: "/home/xucong24/Compiler/checkpoints/Inst2VecTokenizer"
+  decoder_tokenizer_id: "/home/xucong24/Compiler/checkpoints/OptiSeqTokenizer"
+
+data:
+  data_dir: "/home/xucong24/CompilerDream/data/codecontest"
+  val_ratio: 0.05
+  max_length: 512
+  seed: 42
+
+rl:
+  max_gen_length: 32
+  num_rollouts: 8
+  num_reward_workers: 8
+  temperatures: [0.3, 0.5, 0.7, 1.0]
+  gamma: 0.99
+  entropy_coeff: 0.01
+  kl_coeff: 0.0
+  max_grad_norm: 1.0
+  reward_norm: true
+  ppo_epochs: 4
+  ppo_clip_eps: 0.2
+  target_kl: 0.02
+
+output:
+  base_work_dir: "/home/xucong24/Compiler/work_dirs/reinforce_codecontest"
+
+training:
+  learning_rate: 5e-6
+  num_epochs: 1
+  save_steps: 500
+  log_steps: 10
+  eval_steps: 200
+  eval_samples: 50

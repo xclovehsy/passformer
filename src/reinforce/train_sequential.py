@@ -9,7 +9,7 @@ from datetime import datetime
 from tqdm import tqdm
 
 from src.reinforce.trainer import PPOTrainer
-from src.rl.llvm_wrapper import llvm_wrapper
+from src.grpo.llvm_wrapper import llvm_wrapper
 from src.model import PassformerModel, Inst2VecTokenizer, OptiSeqTokenizer
 from src.config import load_config
 from src.utils.utils import get_logger

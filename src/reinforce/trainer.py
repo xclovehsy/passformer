@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from typing import Dict, List, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from src.rl.llvm_wrapper import llvm_wrapper
+from src.grpo.llvm_wrapper import llvm_wrapper
 
 
 class PPOTrainer:
