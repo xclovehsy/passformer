@@ -75,4 +75,13 @@
 # python -m src.reinforce.train --config /home/xucong24/Compiler/configs/reinforce.yaml
 # python -m src.reinforce.train_sequential --config /home/xucong24/Compiler/configs/reinforce_sequential.yaml
 
-python -m src.reinforce.train_largescale --config /home/xucong24/Compiler/configs/reinforce_codecontest.yaml
+# python -m src.reinforce.train_largescale --config /home/xucong24/Compiler/configs/reinforce_codecontest.yaml
+python -m src.reinforce.train_largescale --config /home/xucong24/Compiler/configs/reinforce_cbench_v6.yaml
+
+# python -m src.reinforce.test_cbench --config configs/reinforce_test_cbench.yaml
+# python -m src.reinforce.test_cbench --config configs/reinforce_test_cbench.yaml \
+#     --model_path /home/xucong24/Compiler/work_dirs/reinforce_sequential/best/final_model
+
+# # 只运行某些策略
+# python -m src.reinforce.test_cbench --config configs/reinforce_test_cbench.yaml \
+#     --strategies greedy sampling

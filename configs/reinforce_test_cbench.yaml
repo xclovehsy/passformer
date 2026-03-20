@@ -1,0 +1,59 @@
+model:
+  # 测试用模型路径，可通过 --model_path 命令行参数覆盖
+  model_id: "/home/xucong24/Compiler/work_dirs/reinforce_sequential/20260307_131351/final_model"
+  encoder_tokenizer_id: "/home/xucong24/Compiler/checkpoints/Inst2VecTokenizer"
+  decoder_tokenizer_id: "/home/xucong24/Compiler/checkpoints/OptiSeqTokenizer"
+
+data:
+  bc_files:
+    - "/home/xucong24/Compiler/datasets/cbench-v1/benchmark_cbench-v1_adpcm.bc"
+    - "/home/xucong24/Compiler/datasets/cbench-v1/benchmark_cbench-v1_bitcount.bc"
+    - "/home/xucong24/Compiler/datasets/cbench-v1/benchmark_cbench-v1_blowfish.bc"
+    - "/home/xucong24/Compiler/datasets/cbench-v1/benchmark_cbench-v1_bzip2.bc"
+    - "/home/xucong24/Compiler/datasets/cbench-v1/benchmark_cbench-v1_crc32.bc"
+    - "/home/xucong24/Compiler/datasets/cbench-v1/benchmark_cbench-v1_dijkstra.bc"
+    - "/home/xucong24/Compiler/datasets/cbench-v1/benchmark_cbench-v1_gsm.bc"
+    - "/home/xucong24/Compiler/datasets/cbench-v1/benchmark_cbench-v1_ispell.bc"
+    - "/home/xucong24/Compiler/datasets/cbench-v1/benchmark_cbench-v1_jpeg-c.bc"
+    - "/home/xucong24/Compiler/datasets/cbench-v1/benchmark_cbench-v1_jpeg-d.bc"
+    - "/home/xucong24/Compiler/datasets/cbench-v1/benchmark_cbench-v1_lame.bc"
+    - "/home/xucong24/Compiler/datasets/cbench-v1/benchmark_cbench-v1_patricia.bc"
+    - "/home/xucong24/Compiler/datasets/cbench-v1/benchmark_cbench-v1_qsort.bc"
+    - "/home/xucong24/Compiler/datasets/cbench-v1/benchmark_cbench-v1_rijndael.bc"
+    - "/home/xucong24/Compiler/datasets/cbench-v1/benchmark_cbench-v1_sha.bc"
+    - "/home/xucong24/Compiler/datasets/cbench-v1/benchmark_cbench-v1_stringsearch.bc"
+    - "/home/xucong24/Compiler/datasets/cbench-v1/benchmark_cbench-v1_stringsearch2.bc"
+    - "/home/xucong24/Compiler/datasets/cbench-v1/benchmark_cbench-v1_susan.bc"
+    - "/home/xucong24/Compiler/datasets/cbench-v1/benchmark_cbench-v1_tiff2bw.bc"
+    - "/home/xucong24/Compiler/datasets/cbench-v1/benchmark_cbench-v1_tiff2rgba.bc"
+    - "/home/xucong24/Compiler/datasets/cbench-v1/benchmark_cbench-v1_tiffdither.bc"
+    - "/home/xucong24/Compiler/datasets/cbench-v1/benchmark_cbench-v1_tiffmedian.bc"
+  max_length: 512
+
+rl:
+  max_gen_length: 32
+  num_rollouts: 16
+  num_reward_workers: 16
+  temperatures: [0.3, 0.5, 0.7, 1.0]
+  gamma: 0.99
+  entropy_coeff: 0.01
+  kl_coeff: 0.0
+  max_grad_norm: 1.0
+  reward_norm: true
+  ppo_epochs: 4
+  ppo_clip_eps: 0.2
+  target_kl: 0.02
+
+test:
+  num_rollouts: 16
+  max_gen_length: 32
+  temperatures: [0.3, 0.7]
+  greedy: true
+  beam_search: true
+  num_beams: 4
+
+output:
+  base_work_dir: "/home/xucong24/Compiler/work_dirs/reinforce_test_cbench"
+
+training:
+  learning_rate: 5e-6

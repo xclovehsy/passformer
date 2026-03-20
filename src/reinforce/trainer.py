@@ -50,6 +50,7 @@ class PPOTrainer:
         self.kl_coeff = float(rl.get("kl_coeff", 0.0))
         self.max_grad_norm = float(rl.get("max_grad_norm", 1.0))
         self.reward_norm = rl.get("reward_norm", True)
+        self.reward_clip = float(rl.get("reward_clip", 5.0))
         self.num_reward_workers = int(rl.get("num_reward_workers", self.num_rollouts))
 
         self.ppo_epochs = int(rl.get("ppo_epochs", 4))
@@ -69,6 +70,11 @@ class PPOTrainer:
     # ------------------------------------------------------------------
     # helpers
     # ------------------------------------------------------------------
+    def update_ref_model(self):
+        """Sync reference model weights with current policy."""
+        self.ref_model.load_state_dict(self.model.state_dict())
+        self.logger.info("Reference model updated to current policy weights")
+
     def _assign_rollout_splits(self):
         """Evenly distribute num_rollouts across temperatures."""
         n_temps = len(self.temperatures)
@@ -303,10 +309,20 @@ class PPOTrainer:
         step_rewards, total_rewards = self.compute_step_rewards(sequences, bc_paths)
 
         self.logger.info(
-            f"  rewards  mean={total_rewards.mean().item():.4f}  "
+            f"  rewards(raw)  mean={total_rewards.mean().item():.4f}  "
             f"max={total_rewards.max().item():.4f}  "
             f"min={total_rewards.min().item():.4f}"
         )
+
+        raw_total_rewards = total_rewards.clone()
+
+        # ---- reward normalization + clipping ----
+        if self.reward_norm:
+            sr_mean = step_rewards.mean()
+            sr_std = step_rewards.std().clamp(min=1e-8)
+            step_rewards = (step_rewards - sr_mean) / sr_std
+            step_rewards = step_rewards.clamp(-self.reward_clip, self.reward_clip)
+            total_rewards = step_rewards.sum(dim=-1)
 
         # ---- returns & advantages ----
         returns = self.compute_returns(step_rewards, masks)
@@ -433,8 +449,8 @@ class PPOTrainer:
         )
 
         last_metrics.update({
-            "reward_mean": total_rewards.mean().item(),
-            "reward_max": total_rewards.max().item(),
+            "reward_mean": raw_total_rewards.mean().item(),
+            "reward_max": raw_total_rewards.max().item(),
             "seq_len_mean": masks.sum(dim=-1).mean().item(),
             "best_commandline": best_commandline,
         })
@@ -447,7 +463,7 @@ class PPOTrainer:
                 for b in range(B):
                     start = b * self.num_rollouts + offset
                     end = start + count
-                    grp_rewards.append(total_rewards[start:end])
+                    grp_rewards.append(raw_total_rewards[start:end])
                 grp = torch.cat(grp_rewards)
                 tag = f"t{temp:.1f}"
                 last_metrics[f"reward_mean_{tag}"] = grp.mean().item()

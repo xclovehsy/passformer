@@ -4,7 +4,8 @@ model:
   decoder_tokenizer_id: "/home/xucong24/Compiler/checkpoints/OptiSeqTokenizer"
 
 data:
-  data_dir: "/home/xucong24/CompilerDream/data/codecontest"
+  # data_dir: "/home/xucong24/CompilerDream/data/codecontest"
+  data_dir: "/home/xucong24/Compiler/datasets/cbench-v1"
   val_ratio: 0.05
   max_length: 512
   seed: 42
@@ -22,16 +23,17 @@ rl:
   reward_clip: 5.0
   ref_update_steps: 200
   ppo_epochs: 4
-  ppo_clip_eps: 0.2
-  target_kl: 0.02
+  ppo_clip_eps: 0.1
+  target_kl: 0.05
 
 output:
-  base_work_dir: "/home/xucong24/Compiler/work_dirs/reinforce_codecontest"
+  # base_work_dir: "/home/xucong24/Compiler/work_dirs/reinforce_codecontest"
+  base_work_dir: "/home/xucong24/Compiler/work_dirs/reinforce_cbench_v2"
 
 training:
-  learning_rate: 5e-6
+  learning_rate: 1e-6
   num_epochs: 100
-  save_steps: 500
-  log_steps: 100
-  eval_steps: 200
+  save_steps: 100
+  log_steps: 50
+  eval_steps: 100
   eval_samples: 50

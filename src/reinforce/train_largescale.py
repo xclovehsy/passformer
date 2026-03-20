@@ -140,7 +140,8 @@ def main():
     if not all_bc_files:
         raise FileNotFoundError(f"No .bc files found in {data_dir}")
 
-    train_files, val_files = split_train_val(all_bc_files, val_ratio, seed)
+    # train_files, val_files = split_train_val(all_bc_files, val_ratio, seed) 一定记得修改
+    train_files, val_files = all_bc_files, all_bc_files
     logger.info(f"Dataset: {len(all_bc_files)} total, "
                 f"{len(train_files)} train, {len(val_files)} val")
 
@@ -151,6 +152,9 @@ def main():
     log_steps = int(train_cfg.get("log_steps", 10))
     eval_steps = int(train_cfg.get("eval_steps", 200))
     eval_samples = int(train_cfg.get("eval_samples", 50))
+
+    rl_cfg = cfg["rl"]
+    ref_update_steps = int(rl_cfg.get("ref_update_steps", 0))
 
     global_step = 0
     best_val_reward = -float("inf")
@@ -281,6 +285,10 @@ def main():
                 trainer.model.save_pretrained(ckpt_dir)
                 dec_tok.save_pretrained(ckpt_dir)
                 logger.info(f"Checkpoint saved: {ckpt_dir}")
+
+            # ---- periodic reference model update ----
+            if ref_update_steps > 0 and global_step % ref_update_steps == 0:
+                trainer.update_ref_model()
 
         # ---- epoch summary ----
         if epoch_rewards:
