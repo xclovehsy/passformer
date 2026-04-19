@@ -78,8 +78,8 @@ def evaluate(trainer, val_files: list[str], num_samples: int, logger):
     Returns dict with aggregated metrics.
     """
     sample_files = random.sample(val_files, min(num_samples, len(val_files)))
-    total_rewards = []
-    total_max_rewards = []
+    mean_rewards = []
+    max_rewards = []
 
     for bc_path in sample_files:
         try:
@@ -89,16 +89,15 @@ def evaluate(trainer, val_files: list[str], num_samples: int, logger):
             continue
         sequences, enc_inputs = trainer.rollout(batch)
         _, rewards = trainer.compute_step_rewards(sequences, batch["bc_path"])
-        total_rewards.append(rewards.mean().item())
-        total_max_rewards.append(rewards.max().item())
+        mean_rewards.append(rewards.mean().item())
+        max_rewards.append(rewards.max().item())
 
-    if not total_rewards:
-        return {"val_reward_mean": 0.0, "val_reward_max": 0.0, "val_reward_geomean": 0.0}
+    if not mean_rewards:
+        return {"val_mean_geomean": 0.0, "val_max_geomean": 0.0}
 
     return {
-        "val_reward_mean": sum(total_rewards) / len(total_rewards),
-        "val_reward_max": max(total_max_rewards),
-        "val_reward_geomean": compute_geomean(total_rewards),
+        "val_mean_geomean": compute_geomean(mean_rewards),
+        "val_max_geomean": compute_geomean(max_rewards),
     }
 
 
@@ -261,23 +260,21 @@ def main():
                 logger.info(f"Running evaluation at step {global_step}...")
                 val_metrics = evaluate(trainer, val_files, eval_samples, logger)
 
-                writer.add_scalar("val/reward_mean", val_metrics["val_reward_mean"], global_step)
-                writer.add_scalar("val/reward_max", val_metrics["val_reward_max"], global_step)
-                writer.add_scalar("val/reward_geomean", val_metrics["val_reward_geomean"], global_step)
+                writer.add_scalar("val/mean_geomean", val_metrics["val_mean_geomean"], global_step)
+                writer.add_scalar("val/max_geomean", val_metrics["val_max_geomean"], global_step)
 
                 logger.info(
                     f"Eval step {global_step} | "
-                    f"val_reward_mean={val_metrics['val_reward_mean']:.4f} | "
-                    f"val_reward_max={val_metrics['val_reward_max']:.4f} | "
-                    f"val_reward_geomean={val_metrics['val_reward_geomean']:.4f}"
+                    f"val_mean_geomean={val_metrics['val_mean_geomean']:.4f} | "
+                    f"val_max_geomean={val_metrics['val_max_geomean']:.4f}"
                 )
 
-                if val_metrics["val_reward_mean"] > best_val_reward:
-                    best_val_reward = val_metrics["val_reward_mean"]
+                if val_metrics["val_mean_geomean"] > best_val_reward:
+                    best_val_reward = val_metrics["val_mean_geomean"]
                     best_dir = os.path.join(work_dir, "best_model")
                     trainer.model.save_pretrained(best_dir)
                     dec_tok.save_pretrained(best_dir)
-                    logger.info(f"New best model saved: val_reward_mean={best_val_reward:.4f}")
+                    logger.info(f"New best model saved: val_mean_geomean={best_val_reward:.4f}")
 
             # ---- periodic checkpoint ----
             if global_step % save_steps == 0:

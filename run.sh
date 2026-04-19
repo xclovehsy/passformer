@@ -76,7 +76,7 @@
 # python -m src.reinforce.train_sequential --config /home/xucong24/Compiler/configs/reinforce_sequential.yaml
 
 # python -m src.reinforce.train_largescale --config /home/xucong24/Compiler/configs/reinforce_codecontest.yaml
-python -m src.reinforce.train_largescale --config /home/xucong24/Compiler/configs/reinforce_cbench_v6.yaml
+# python -m src.reinforce.train_largescale --config /home/xucong24/Compiler/configs/reinforce_cbench_v7.yaml
 
 # python -m src.reinforce.test_cbench --config configs/reinforce_test_cbench.yaml
 # python -m src.reinforce.test_cbench --config configs/reinforce_test_cbench.yaml \
@@ -85,3 +85,15 @@ python -m src.reinforce.train_largescale --config /home/xucong24/Compiler/config
 # # 只运行某些策略
 # python -m src.reinforce.test_cbench --config configs/reinforce_test_cbench.yaml \
 #     --strategies greedy sampling
+
+
+
+python -m src.reinforce.test \
+    --model_path /home/xucong24/Compiler/work_dirs/reinforce_cbench_v2/20260317_160719/best_model \
+    --encoder_tokenizer_path /home/xucong24/Compiler/checkpoints/Inst2VecTokenizer \
+    --decoder_tokenizer_path /home/xucong24/Compiler/checkpoints/OptiSeqTokenizer \
+    --num_rollouts 16 \
+    --temperatures 0.3,0.7 \
+    --max_gen_length 32 \
+    --leaderboard_results passformer_results.csv \
+    --n 1
