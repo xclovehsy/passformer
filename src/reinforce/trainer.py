@@ -1,5 +1,6 @@
 import os
 import copy
+import json
 import torch
 import torch.nn.functional as F
 from typing import Dict, List, Optional
@@ -67,6 +68,10 @@ class PPOTrainer:
             lr=float(cfg["training"]["learning_rate"]),
         )
 
+        self.train_records_dir = os.path.join(self.work_dir, "train_records")
+        os.makedirs(self.train_records_dir, exist_ok=True)
+        self.train_records_path = os.path.join(self.train_records_dir, "rollouts.jsonl")
+
     # ------------------------------------------------------------------
     # helpers
     # ------------------------------------------------------------------
@@ -81,6 +86,65 @@ class PPOTrainer:
         base, remainder = divmod(self.num_rollouts, n_temps)
         self.rollout_splits = [base + (1 if i < remainder else 0)
                                for i in range(n_temps)]
+
+    def _build_rollout_temperatures(self, batch_size: int) -> List[float]:
+        """Build per-rollout temperature list in rollout output order."""
+        if len(self.temperatures) == 1:
+            return [self.temperatures[0]] * (batch_size * self.num_rollouts)
+
+        rollout_temps: List[float] = []
+        for _ in range(batch_size):
+            for temp, count in zip(self.temperatures, self.rollout_splits):
+                rollout_temps.extend([temp] * count)
+        return rollout_temps
+
+    def _save_rollout_records(
+        self,
+        *,
+        step_id: Optional[int],
+        epoch: Optional[int],
+        bc_paths: List[str],
+        sequences: torch.Tensor,
+        masks: torch.Tensor,
+        raw_step_rewards: torch.Tensor,
+        post_step_rewards: torch.Tensor,
+        raw_total_rewards: torch.Tensor,
+        post_total_rewards: torch.Tensor,
+    ) -> None:
+        """Append rollout-level training records to local jsonl file."""
+        batch_size = len(bc_paths)
+        rollout_temps = self._build_rollout_temperatures(batch_size)
+        num_rollouts = sequences.shape[0]
+
+        seq_cpu = sequences.detach().cpu()
+        masks_cpu = masks.detach().cpu()
+        raw_step_cpu = raw_step_rewards.detach().cpu()
+        post_step_cpu = post_step_rewards.detach().cpu()
+        raw_total_cpu = raw_total_rewards.detach().cpu()
+        post_total_cpu = post_total_rewards.detach().cpu()
+
+        with open(self.train_records_path, "a", encoding="utf-8") as f:
+            for i in range(num_rollouts):
+                sample_idx = i // self.num_rollouts
+                bc_path = bc_paths[sample_idx]
+                record = {
+                    "step": step_id,
+                    "epoch": epoch,
+                    "rollout_index": i,
+                    "rollout_index_in_sample": i % self.num_rollouts,
+                    "temperature": rollout_temps[i],
+                    "bc_name": os.path.basename(bc_path),
+                    "bc_path": bc_path,
+                    "pass_sequence": self.dec_tok.decode(
+                        seq_cpu[i], skip_special_tokens=True
+                    ),
+                    "valid_steps": int(masks_cpu[i].sum().item()),
+                    "raw_reward_total": float(raw_total_cpu[i].item()),
+                    "post_reward_total": float(post_total_cpu[i].item()),
+                    "raw_step_rewards": [float(x) for x in raw_step_cpu[i].tolist()],
+                    "post_step_rewards": [float(x) for x in post_step_cpu[i].tolist()],
+                }
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     # ------------------------------------------------------------------
     # 1. Rollout
@@ -290,7 +354,12 @@ class PPOTrainer:
     # ------------------------------------------------------------------
     # 5. Full training step (PPO)
     # ------------------------------------------------------------------
-    def train_step(self, batch) -> Dict[str, float]:
+    def train_step(
+        self,
+        batch,
+        step_id: Optional[int] = None,
+        epoch: Optional[int] = None,
+    ) -> Dict[str, float]:
         """One PPO update.
 
         Flow: rollout → per-step rewards → returns → advantages
@@ -314,15 +383,26 @@ class PPOTrainer:
             f"min={total_rewards.min().item():.4f}"
         )
 
+        raw_step_rewards = step_rewards.clone()
         raw_total_rewards = total_rewards.clone()
+
+        # Clip each pass reward first to suppress extreme outliers from env noise.
+        step_rewards = step_rewards.clamp(-1.0, 1.0) * masks
+        total_rewards = step_rewards.sum(dim=-1)
 
         # ---- reward normalization + clipping ----
         if self.reward_norm:
-            sr_mean = step_rewards.mean()
-            sr_std = step_rewards.std().clamp(min=1e-8)
-            step_rewards = (step_rewards - sr_mean) / sr_std
-            step_rewards = step_rewards.clamp(-self.reward_clip, self.reward_clip)
+            # Normalize within each sequence to reduce cross-sample reward scale noise.
+            seq_valid = masks.sum(dim=-1, keepdim=True).clamp(min=1.0)
+            seq_mean = (step_rewards * masks).sum(dim=-1, keepdim=True) / seq_valid
+            seq_var = ((step_rewards - seq_mean).pow(2) * masks).sum(dim=-1, keepdim=True) / seq_valid
+            seq_std = seq_var.sqrt().clamp(min=1e-8)
+            step_rewards = ((step_rewards - seq_mean) / seq_std) * masks
+            step_rewards = step_rewards.clamp(-self.reward_clip, self.reward_clip) * masks
             total_rewards = step_rewards.sum(dim=-1)
+
+        post_step_rewards = step_rewards.clone()
+        post_total_rewards = total_rewards.clone()
 
         # ---- returns & advantages ----
         returns = self.compute_returns(step_rewards, masks)
@@ -451,9 +531,25 @@ class PPOTrainer:
         last_metrics.update({
             "reward_mean": raw_total_rewards.mean().item(),
             "reward_max": raw_total_rewards.max().item(),
+            "reward_min": raw_total_rewards.min().item(),
+            "reward_post_mean": total_rewards.mean().item(),
+            "reward_post_max": total_rewards.max().item(),
+            "reward_post_min": total_rewards.min().item(),
             "seq_len_mean": masks.sum(dim=-1).mean().item(),
             "best_commandline": best_commandline,
         })
+
+        self._save_rollout_records(
+            step_id=step_id,
+            epoch=epoch,
+            bc_paths=bc_paths,
+            sequences=sequences,
+            masks=masks,
+            raw_step_rewards=raw_step_rewards,
+            post_step_rewards=post_step_rewards,
+            raw_total_rewards=raw_total_rewards,
+            post_total_rewards=post_total_rewards,
+        )
 
         if len(self.temperatures) > 1:
             B = len(bc_paths)

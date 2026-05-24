@@ -77,8 +77,13 @@
 
 
 # python -m src.reinforce.train_largescale --config /home/xucong24/Compiler/configs/reinforce_codecontest_v2.yaml --max_train_samples 100
-python -m src.reinforce.train_largescale --config /home/xucong24/Compiler/configs/reinforce_codecontest_v2.yaml
-
+# python -m src.reinforce.train_largescale --config /home/xucong24/Compiler/configs/reinforce_codecontest_v2.yaml
+# python -m src.reinforce.train_largescale --config /home/xucong24/Compiler/configs/reinforce_codecontest_v3.yaml
+# python -m src.reinforce.train_largescale --config /home/xucong24/Compiler/configs/reinforce_codecontest_v4.yaml
+# python -m src.reinforce.train_largescale --config /home/xucong24/Compiler/configs/reinforce_codecontest_add_v1.yaml
+# python -m src.reinforce.train_largescale --config /home/xucong24/Compiler/configs/reinforce_codecontest_v7.yaml
+# python -m src.reinforce.train_largescale --config /home/xucong24/Compiler/configs/reinforce_codecontest_add_v2.yaml
+# python -m src.reinforce.train_largescale --config /home/xucong24/Compiler/configs/reinforce_codecontest_only_v1.yaml
 # python -m src.reinforce.train_largescale --config /home/xucong24/Compiler/configs/reinforce_cbench_v7.yaml
 
 # python -m src.reinforce.test_cbench --config configs/reinforce_test_cbench.yaml
@@ -102,3 +107,25 @@ python -m src.reinforce.train_largescale --config /home/xucong24/Compiler/config
 #     --max_gen_length 32 \
 #     --leaderboard_results passformer_results.csv \
 #     --n 1
+
+
+# test_decode
+# 温度 6 格点（0.2→1.2、步进 0.2）：自低到高覆盖。每个温度各 --num_rollouts 条；条数 x 6 为 sampling 量。
+# 只输入目录（递归子目录内所有 .bc）
+python -m src.reinforce.test_decode \
+    --model_path /home/xucong24/Compiler/work_dirs/reinforce_codecontest_v7/20260425_154502/best_model \
+    --bc_dir /home/xucong24/Compiler/datasets/compilerdream_data/codecontest_test   \
+    --modes greedy,beam,sampling,sampling_topp \
+    --num_rollouts 32 \
+    --temperatures=0.2,0.4,0.6,0.8,1.0,1.2 \
+    --encoder_tokenizer_path /home/xucong24/Compiler/checkpoints/Inst2VecTokenizer \
+    --decoder_tokenizer_path /home/xucong24/Compiler/checkpoints/OptiSeqTokenizer \
+    --seed 42
+
+# only 
+# /home/xucong24/Compiler/work_dirs/reinforce_codecontest_only_v1/20260427_145345/best_model
+# add
+# /home/xucong24/Compiler/work_dirs/reinforce_codecontest_add_v2/20260426_153759/best_model
+# concat 
+# 
+# /home/xucong24/Compiler/work_dirs/reinforce_codecontest_v7/20260425_154502/best_model

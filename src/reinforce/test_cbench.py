@@ -4,7 +4,7 @@ Evaluate a trained Passformer (PPO) model on the cBench-v1 dataset.
 Supports three generation strategies:
   - Greedy decoding (temperature → 0)
   - Beam search
-  - Multi-temperature sampling (same as training rollout)
+  - Multi-temperature sampling: 各温度**各自** `num_rollouts` 条、分别取最高 reward
 
 For each benchmark the script records:
   - Per-step and total reward from the LLVM environment
@@ -27,7 +27,7 @@ import time
 import argparse
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 import numpy as np
@@ -60,8 +60,18 @@ class BenchmarkTestResult:
     num_passes: int = 0
     strategy: str = ""
     num_rollouts: int = 0
+    # 每条生成序列: rollout_index, pass_sequence, reward, is_best
+    rollout_details: List[Dict[str, Any]] = field(default_factory=list)
+    # 多温度 sampling：每个温度各 num_rollouts 条，分别取最优；sampling_key 如 sample_0.3
+    temperature: Optional[float] = None
+    sampling_key: str = ""
+    # 分阶段耗时 (秒，perf_counter)
+    load_obs_time: float = 0.0
+    encode_time: float = 0.0
     inference_time: float = 0.0
     eval_time: float = 0.0
+    ic_count_time: float = 0.0
+    wall_time_total: float = 0.0
     success: bool = True
     error_message: str = ""
 
@@ -192,44 +202,37 @@ def generate_beam(model, enc_inputs, dec_tok, max_gen_length, num_beams, device)
 
 
 @torch.no_grad()
-def generate_sampling(model, enc_inputs, dec_tok, max_gen_length,
-                      num_rollouts, temperatures, device):
-    """Multi-temperature sampling (same as training rollout)."""
-    n_temps = len(temperatures)
-    base, remainder = divmod(num_rollouts, n_temps)
-    rollout_splits = [base + (1 if i < remainder else 0) for i in range(n_temps)]
+def generate_sampling_at_temperature(
+    model,
+    enc_inputs: dict,
+    dec_tok,
+    max_gen_length: int,
+    num_rollouts: int,
+    temperature: float,
+    device: torch.device,
+) -> torch.Tensor:
+    """在单一温度下采样 `num_rollouts` 条序列（与训练里「按温度分桶」的分配方式不同）。"""
+    n = int(num_rollouts)
+    if n < 1:
+        raise ValueError("num_rollouts 必须 >= 1")
+    ids = enc_inputs["input_ids"].to(device).repeat_interleave(n, dim=0)
+    mask = enc_inputs["attention_mask"].to(device).repeat_interleave(n, dim=0)
+    auto = enc_inputs["autophase"].to(device).repeat_interleave(n, dim=0)
+    return model.generate(
+        input_ids=ids,
+        attention_mask=mask,
+        autophase=auto,
+        max_length=max_gen_length,
+        do_sample=True,
+        temperature=float(temperature),
+        pad_token_id=dec_tok.pad_token_id,
+        eos_token_id=dec_tok.eos_token_id,
+    )
 
-    seq_groups = []
-    for temp, count in zip(temperatures, rollout_splits):
-        if count == 0:
-            continue
-        ids = enc_inputs["input_ids"].to(device).repeat_interleave(count, dim=0)
-        mask = enc_inputs["attention_mask"].to(device).repeat_interleave(count, dim=0)
-        auto = enc_inputs["autophase"].to(device).repeat_interleave(count, dim=0)
-        seqs = model.generate(
-            input_ids=ids,
-            attention_mask=mask,
-            autophase=auto,
-            max_length=max_gen_length,
-            do_sample=True,
-            temperature=temp,
-            pad_token_id=dec_tok.pad_token_id,
-            eos_token_id=dec_tok.eos_token_id,
-        )
-        seq_groups.append(seqs)
 
-    max_len = max(s.shape[1] for s in seq_groups)
-    padded = []
-    for s in seq_groups:
-        if s.shape[1] < max_len:
-            pad = torch.full(
-                (s.shape[0], max_len - s.shape[1]),
-                dec_tok.pad_token_id, dtype=s.dtype, device=s.device,
-            )
-            s = torch.cat([s, pad], dim=1)
-        padded.append(s)
-
-    return torch.cat(padded, dim=0)
+def sampling_key_for_temp(t: float) -> str:
+    """行标签，如 sample_0.3；用于按温度分统计与落表。"""
+    return f"sample_{t}"
 
 
 # ======================================================================
@@ -267,11 +270,14 @@ def eval_pass_sequence(dec_tok, token_ids: List[int], bc_path: str) -> float:
     return total_reward
 
 
-def evaluate_sequences(dec_tok, sequences, bc_path: str):
-    """Evaluate all generated sequences and return (rewards, best_idx, best_pass_str)."""
+def evaluate_sequences(
+    dec_tok, sequences, bc_path: str
+) -> Tuple[np.ndarray, int, str, List[Dict[str, Any]]]:
+    """评估所有生成序列。返回 (rewards, best_idx, best_pass_str, rollout_details)。"""
     gen_tokens = sequences[:, 1:]
-    rewards = []
-    for i in range(gen_tokens.shape[0]):
+    rewards: List[float] = []
+    n = int(gen_tokens.shape[0])
+    for i in range(n):
         token_ids = gen_tokens[i].tolist()
         r = eval_pass_sequence(dec_tok, token_ids, bc_path)
         rewards.append(r)
@@ -280,7 +286,19 @@ def evaluate_sequences(dec_tok, sequences, bc_path: str):
     best_idx = int(rewards_arr.argmax())
     best_seq = sequences[best_idx]
     best_pass_str = dec_tok.decode(best_seq, skip_special_tokens=True)
-    return rewards_arr, best_idx, best_pass_str
+
+    rollout_details: List[Dict[str, Any]] = []
+    for i in range(n):
+        pass_str = dec_tok.decode(sequences[i], skip_special_tokens=True)
+        rollout_details.append(
+            {
+                "rollout_index": i,
+                "pass_sequence": pass_str,
+                "reward": float(rewards_arr[i]),
+                "is_best": i == best_idx,
+            }
+        )
+    return rewards_arr, best_idx, best_pass_str, rollout_details
 
 
 # ======================================================================
@@ -290,20 +308,27 @@ def evaluate_sequences(dec_tok, sequences, bc_path: str):
 def evaluate_benchmark(
     model, enc_tok, dec_tok, bc_path: str, strategy: str,
     cfg_test: dict, cfg_data: dict, device, logger,
-) -> BenchmarkTestResult:
+) -> List[BenchmarkTestResult]:
+    """每种策略评估一个 .bc。greedy/beam 返回 1 行；sampling 对每个温度各返回 1 行
+   （各温度独立生成 num_rollouts 条、各自取 argmax 作为 best）。"""
     bm_name = os.path.basename(bc_path).replace(".bc", "")
     result = BenchmarkTestResult(benchmark=bm_name, bc_path=bc_path, strategy=strategy)
+    t_wall0 = time.perf_counter()
 
     try:
+        t0 = time.perf_counter()
         batch = build_single_sample(bc_path)
+        result.load_obs_time = time.perf_counter() - t0
     except Exception as e:
         logger.warning(f"[{bm_name}] Failed to build sample: {e}")
         result.success = False
         result.error_message = str(e)
-        return result
+        result.wall_time_total = time.perf_counter() - t_wall0
+        return [result]
 
     llvm_irs = batch["llvm_ir"]
     autophases = batch["autophase"].to(device)
+    t0 = time.perf_counter()
     inputs = enc_tok(
         llvm_irs, padding=True, truncation=True,
         max_length=cfg_data.get("max_length", 512), return_tensors="pt",
@@ -313,39 +338,104 @@ def evaluate_benchmark(
         "attention_mask": inputs["attention_mask"].to(device),
         "autophase": autophases,
     }
-
+    enc_ms = time.perf_counter() - t0
+    result.encode_time = enc_ms
     max_gen_length = int(cfg_test.get("max_gen_length", 32))
-
-    # --- generate ---
-    t0 = time.time()
     model.eval()
 
-    if strategy == "greedy":
-        sequences = generate_greedy(model, enc_inputs, dec_tok, max_gen_length, device)
-        result.num_rollouts = 1
-    elif strategy == "beam":
-        num_beams = int(cfg_test.get("num_beams", 4))
-        sequences = generate_beam(model, enc_inputs, dec_tok, max_gen_length, num_beams, device)
-        result.num_rollouts = 1
-    elif strategy == "sampling":
+    if strategy == "sampling":
         num_rollouts = int(cfg_test.get("num_rollouts", 16))
         temps = cfg_test.get("temperatures", [0.3, 0.7])
         if not isinstance(temps, list):
             temps = [float(temps)]
-        sequences = generate_sampling(
-            model, enc_inputs, dec_tok, max_gen_length,
-            num_rollouts, [float(t) for t in temps], device,
+        temp_list = [float(t) for t in temps]
+        if not temp_list:
+            result.success = False
+            result.error_message = "temperatures 列表为空"
+            result.wall_time_total = time.perf_counter() - t_wall0
+            return [result]
+
+        out: List[BenchmarkTestResult] = []
+        for temp in temp_list:
+            t_inf0 = time.perf_counter()
+            sequences = generate_sampling_at_temperature(
+                model, enc_inputs, dec_tok, max_gen_length, num_rollouts, temp, device
+            )
+            inf_t = time.perf_counter() - t_inf0
+
+            t_ev0 = time.perf_counter()
+            rewards_arr, _, best_pass_str, rollout_details = evaluate_sequences(
+                dec_tok, sequences, bc_path
+            )
+            for d in rollout_details:
+                d["temperature"] = float(temp)
+            ev_t = time.perf_counter() - t_ev0
+
+            r = BenchmarkTestResult(
+                benchmark=bm_name, bc_path=bc_path, strategy="sampling",
+                load_obs_time=result.load_obs_time, encode_time=enc_ms,
+                num_rollouts=num_rollouts, temperature=temp,
+                sampling_key=sampling_key_for_temp(temp),
+            )
+            r.inference_time = inf_t
+            r.eval_time = ev_t
+            r.rollout_details = rollout_details
+            r.reward_total = float(rewards_arr.sum())
+            r.reward_mean = float(rewards_arr.mean())
+            r.reward_max = float(rewards_arr.max())
+            r.best_pass_sequence = best_pass_str
+            r.num_passes = (
+                len(best_pass_str.split()) if best_pass_str.strip() else 0
+            )
+
+            t_ic0 = time.perf_counter()
+            try:
+                ic = get_ic_counts(bc_path)
+                r.original_ic = ic["original"]
+                r.o3_ic = ic["o3"]
+                r.oz_ic = ic["oz"]
+                if best_pass_str.strip():
+                    r.optimized_ic = apply_passes_and_get_ic(bc_path, best_pass_str)
+                else:
+                    r.optimized_ic = r.original_ic
+                if r.original_ic > 0:
+                    r.ic_reduction = 1.0 - r.optimized_ic / r.original_ic
+                if ic["o3"] > 0:
+                    r.ic_reduction_vs_o3 = 1.0 - r.optimized_ic / ic["o3"]
+            except Exception as e:
+                logger.warning(f"[{bm_name} {r.sampling_key}] IC count failed: {e}")
+            finally:
+                r.ic_count_time = time.perf_counter() - t_ic0
+            out.append(r)
+        wall_end = time.perf_counter() - t_wall0
+        for r in out:
+            r.wall_time_total = wall_end
+        return out
+
+    # ---- greedy / beam：单行结果 ----
+    t0 = time.perf_counter()
+    if strategy == "greedy":
+        sequences = generate_greedy(
+            model, enc_inputs, dec_tok, max_gen_length, device
         )
-        result.num_rollouts = num_rollouts
+        result.num_rollouts = 1
+    elif strategy == "beam":
+        num_beams = int(cfg_test.get("num_beams", 4))
+        sequences = generate_beam(
+            model, enc_inputs, dec_tok, max_gen_length, num_beams, device
+        )
+        result.num_rollouts = 1
     else:
         raise ValueError(f"Unknown strategy: {strategy}")
 
-    result.inference_time = time.time() - t0
+    result.inference_time = time.perf_counter() - t0
 
-    # --- evaluate in LLVM env ---
-    t1 = time.time()
-    rewards_arr, best_idx, best_pass_str = evaluate_sequences(dec_tok, sequences, bc_path)
-    result.eval_time = time.time() - t1
+    t1 = time.perf_counter()
+    rewards_arr, _, best_pass_str, rollout_details = evaluate_sequences(
+        dec_tok, sequences, bc_path
+    )
+    result.eval_time = time.perf_counter() - t1
+    result.rollout_details = rollout_details
 
     result.reward_total = float(rewards_arr.sum())
     result.reward_mean = float(rewards_arr.mean())
@@ -353,26 +443,27 @@ def evaluate_benchmark(
     result.best_pass_sequence = best_pass_str
     result.num_passes = len(best_pass_str.split()) if best_pass_str.strip() else 0
 
-    # --- instruction count metrics ---
+    t_ic0 = time.perf_counter()
     try:
         ic = get_ic_counts(bc_path)
         result.original_ic = ic["original"]
         result.o3_ic = ic["o3"]
         result.oz_ic = ic["oz"]
-
         if best_pass_str.strip():
             result.optimized_ic = apply_passes_and_get_ic(bc_path, best_pass_str)
         else:
             result.optimized_ic = result.original_ic
-
         if result.original_ic > 0:
             result.ic_reduction = 1.0 - result.optimized_ic / result.original_ic
         if ic["o3"] > 0:
             result.ic_reduction_vs_o3 = 1.0 - result.optimized_ic / ic["o3"]
     except Exception as e:
         logger.warning(f"[{bm_name}] IC count failed: {e}")
+    finally:
+        result.ic_count_time = time.perf_counter() - t_ic0
+        result.wall_time_total = time.perf_counter() - t_wall0
 
-    return result
+    return [result]
 
 
 # ======================================================================
@@ -380,8 +471,10 @@ def evaluate_benchmark(
 # ======================================================================
 
 def print_results_table(results: List[BenchmarkTestResult], logger):
+    has_sk = any(r.sampling_key for r in results)
+    sk_col = f"{'SKey':<12} " if has_sk else ""
     header = (
-        f"{'Benchmark':<35} {'Reward':>8} {'Orig IC':>8} {'Opt IC':>8} "
+        f"{'Benchmark':<32} {sk_col}{'Rwd':>8} {'Orig IC':>8} {'Opt IC':>8} "
         f"{'O3 IC':>8} {'IC Red%':>8} {'vs O3%':>8} {'#Pass':>6} {'Time':>7}"
     )
     logger.info(header)
@@ -390,11 +483,20 @@ def print_results_table(results: List[BenchmarkTestResult], logger):
         if not r.success:
             logger.info(f"{r.benchmark:<35} FAILED: {r.error_message}")
             continue
+        wall = r.wall_time_total or (
+            r.load_obs_time
+            + r.encode_time
+            + r.inference_time
+            + r.eval_time
+            + r.ic_count_time
+        )
+        sk = f"{(r.sampling_key or ''):<12} " if has_sk else ""
+        bm = f"{r.benchmark:<32}"
         logger.info(
-            f"{r.benchmark:<35} {r.reward_max:>8.2f} {r.original_ic:>8d} "
+            f"{bm} {sk}{r.reward_max:>8.2f} {r.original_ic:>8d} "
             f"{r.optimized_ic:>8d} {r.o3_ic:>8d} "
             f"{r.ic_reduction * 100:>7.2f}% {r.ic_reduction_vs_o3 * 100:>7.2f}% "
-            f"{r.num_passes:>6d} {r.inference_time + r.eval_time:>6.1f}s"
+            f"{r.num_passes:>6d} {wall:>6.1f}s"
         )
 
 
@@ -416,30 +518,114 @@ def compute_test_summary(results: List[BenchmarkTestResult], strategy: str) -> T
     )
 
 
+def compute_summaries_by_sampling_key(
+    results: List[BenchmarkTestResult],
+) -> Dict[str, TestSummary]:
+    """sampling 多温度：按 sampling_key 分别汇总（如 sample_0.3、sample_0.5）。"""
+    by_key: Dict[str, List[BenchmarkTestResult]] = {}
+    for r in results:
+        if not r.sampling_key:
+            continue
+        by_key.setdefault(r.sampling_key, []).append(r)
+    return {k: compute_test_summary(v, k) for k, v in sorted(by_key.items())}
+
+
+def _result_dict_without_rollouts(r: BenchmarkTestResult) -> dict:
+    d = asdict(r)
+    d.pop("rollout_details", None)
+    return d
+
+
+# decode_all_rollouts.jsonl 每行中「基准汇总」部分固定为这些键（与 decode_all_results.csv 一致；
+# reward_mean / reward_max 等为整条评估统计；optimized_ic 等为 reward argmax 序列对应指标）。
+DECODE_ROLLOUT_JSONL_SUMMARY_KEYS: Tuple[str, ...] = (
+    "benchmark",
+    "bc_path",
+    "strategy",
+    "original_ic",
+    "optimized_ic",
+    "o3_ic",
+    "oz_ic",
+    "reward_total",
+    "reward_max",
+    "reward_mean",
+    "ic_reduction",
+    "ic_reduction_vs_o3",
+    "best_pass_sequence",
+    "num_passes",
+    "num_rollouts",
+    "temperature",
+    "sampling_key",
+    "load_obs_time",
+    "encode_time",
+    "inference_time",
+    "eval_time",
+    "ic_count_time",
+    "wall_time_total",
+    "success",
+    "error_message",
+)
+
+
+def save_rollouts_jsonl(results: List[BenchmarkTestResult], out_path: str) -> str:
+    """将每条生成序列写成一行 JSON。
+
+    先写入 DECODE_ROLLOUT_JSONL_SUMMARY_KEYS 中的汇总字段，再写入 rollout 专有字段
+    （rollout_index、pass_sequence、reward、is_best；sampling 时 row 内可有 temperature）。
+    optimized_ic / ic_reduction / best_pass_sequence / num_passes 等对应 **reward 最优**
+    序列，不一定等于当前行的 pass_sequence。
+    """
+    with open(out_path, "w", encoding="utf-8") as f:
+        for r in results:
+            if not r.success or not r.rollout_details:
+                continue
+            raw = _result_dict_without_rollouts(r)
+            base = {k: raw[k] for k in DECODE_ROLLOUT_JSONL_SUMMARY_KEYS}
+            for row in r.rollout_details:
+                rec = {**base, **row}
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    return out_path
+
+
 def save_results(results: List[BenchmarkTestResult], summary: TestSummary,
-                 work_dir: str, strategy: str):
+                 work_dir: str, strategy: str) -> Tuple[str, str, str]:
     csv_path = os.path.join(work_dir, f"results_{strategy}.csv")
     fieldnames = [
         "benchmark", "bc_path", "original_ic", "optimized_ic", "o3_ic", "oz_ic",
         "reward_total", "reward_mean", "reward_max",
         "ic_reduction", "ic_reduction_vs_o3",
         "best_pass_sequence", "num_passes", "strategy", "num_rollouts",
-        "inference_time", "eval_time", "success", "error_message",
+        "temperature", "sampling_key",
+        "load_obs_time", "encode_time", "inference_time", "eval_time", "ic_count_time",
+        "wall_time_total",
+        "success", "error_message",
     ]
     with open(csv_path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer = csv.DictWriter(
+            f, fieldnames=fieldnames, extrasaction="ignore"
+        )
         writer.writeheader()
         for r in results:
             writer.writerow(asdict(r))
 
+    summary_by = compute_summaries_by_sampling_key(results)
     json_path = os.path.join(work_dir, f"results_{strategy}.json")
     with open(json_path, "w", encoding="utf-8") as f:
-        json.dump({
-            "summary": asdict(summary),
-            "results": [asdict(r) for r in results],
-        }, f, indent=2, ensure_ascii=False)
+        json.dump(
+            {
+                "summary": asdict(summary),
+                "summary_by_sampling_key": {
+                    k: asdict(s) for k, s in summary_by.items()
+                },
+                "results": [_result_dict_without_rollouts(r) for r in results],
+            },
+            f, indent=2, ensure_ascii=False,
+        )
 
-    return csv_path, json_path
+    rollouts_path = os.path.join(work_dir, f"rollouts_{strategy}.jsonl")
+    save_rollouts_jsonl(results, rollouts_path)
+
+    return csv_path, json_path, rollouts_path
 
 
 def main():
@@ -499,24 +685,24 @@ def main():
             bm_name = os.path.basename(bc_path).replace(".bc", "")
             logger.info(f"\n--- {bm_name} ({strategy}) ---")
 
-            result = evaluate_benchmark(
+            for result in evaluate_benchmark(
                 model, enc_tok, dec_tok, bc_path, strategy,
                 cfg_test, cfg["data"], device, logger,
-            )
-            results.append(result)
-
-            if result.success:
-                logger.info(
-                    f"  reward_max={result.reward_max:.4f}  "
-                    f"IC: {result.original_ic} -> {result.optimized_ic} "
-                    f"(O3={result.o3_ic})  "
-                    f"reduction={result.ic_reduction*100:.2f}%  "
-                    f"passes={result.num_passes}"
-                )
-                if result.best_pass_sequence:
-                    logger.info(f"  best_seq: {result.best_pass_sequence}")
-            else:
-                logger.warning(f"  FAILED: {result.error_message}")
+            ):
+                results.append(result)
+                if result.success:
+                    sk = f"[{result.sampling_key}] " if result.sampling_key else ""
+                    logger.info(
+                        f"  {sk}reward_max={result.reward_max:.4f}  "
+                        f"IC: {result.original_ic} -> {result.optimized_ic} "
+                        f"(O3={result.o3_ic})  "
+                        f"reduction={result.ic_reduction*100:.2f}%  "
+                        f"passes={result.num_passes}"
+                    )
+                    if result.best_pass_sequence:
+                        logger.info(f"  {sk}best_seq: {result.best_pass_sequence}")
+                else:
+                    logger.warning(f"  FAILED: {result.error_message}")
 
         # ---- summary ----
         summary = compute_test_summary(results, strategy)
@@ -534,9 +720,17 @@ def main():
                      f"max={summary.reward_max:.4f}")
         logger.info(f"IC Reduction  mean={summary.ic_reduction_mean*100:.2f}%  "
                      f"geomean={summary.ic_reduction_geomean*100:.2f}%")
+        if strategy == "sampling":
+            for k, sk in compute_summaries_by_sampling_key(results).items():
+                logger.info(
+                    f"  [按温度] {k}:  n={sk.total_benchmarks}  reward_mean={sk.reward_mean:.4f}  "
+                    f"geomean={sk.reward_geomean:.4f}  "
+                    f"ic_red_geomean={sk.ic_reduction_geomean*100:.2f}%"
+                )
 
-        csv_path, json_path = save_results(results, summary, work_dir, strategy)
-        logger.info(f"Results saved: {csv_path}")
+        csv_path, json_path, roll_path = save_results(results, summary, work_dir, strategy)
+        logger.info(f"Results saved: {csv_path}  {json_path}")
+        logger.info(f"Per-rollout sequences (JSONL): {roll_path}")
 
     # ---- cross-strategy comparison ----
     if len(all_summaries) > 1:

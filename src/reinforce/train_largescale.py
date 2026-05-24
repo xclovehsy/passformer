@@ -98,6 +98,37 @@ def build_single_sample(bc_path: str):
     return sample
 
 
+def build_batch_samples(bc_paths: list[str], logger):
+    """Build a batch observation dict from multiple bc files."""
+    llvm_irs = []
+    autophases = []
+    valid_paths = []
+    skipped = 0
+
+    for bc_path in bc_paths:
+        bm_name = os.path.basename(bc_path).replace(".bc", "")
+        try:
+            sample = build_single_sample(bc_path)
+        except Exception as e:
+            logger.warning(f"Skipping {bm_name}: {e}")
+            skipped += 1
+            continue
+
+        llvm_irs.append(sample["llvm_ir"][0])
+        autophases.append(sample["autophase"].squeeze(0))
+        valid_paths.append(bc_path)
+
+    if not valid_paths:
+        return None, skipped
+
+    batch = {
+        "llvm_ir": llvm_irs,
+        "autophase": torch.stack(autophases, dim=0),
+        "bc_path": valid_paths,
+    }
+    return batch, skipped
+
+
 def compute_geomean(rewards: list[float]) -> float:
     if not rewards:
         return 0.0
@@ -326,20 +357,31 @@ def main():
     save_steps = int(train_cfg.get("save_steps", 500))
     log_steps = int(train_cfg.get("log_steps", 10))
     eval_steps = int(train_cfg.get("eval_steps", 200))
+    micro_batch_size = int(train_cfg.get("micro_batch_size", 1))
+    if micro_batch_size <= 0:
+        raise ValueError("training.micro_batch_size must be > 0")
 
     rl_cfg = cfg["rl"]
     ref_update_steps = int(rl_cfg.get("ref_update_steps", 0))
 
     global_step = 0
     best_val_reward = -float("inf")
+    updates_per_epoch = math.ceil(len(train_files) / micro_batch_size)
+    total_updates = updates_per_epoch * num_epochs
     total_train_samples = len(train_files) * num_epochs
-    logger.info(f"Training: {num_epochs} epochs, {len(train_files)} samples/epoch, "
-                f"{total_train_samples} total steps")
+    logger.info(
+        f"Training: {num_epochs} epochs, {len(train_files)} samples/epoch, "
+        f"micro_batch_size={micro_batch_size}, ~{updates_per_epoch} updates/epoch, "
+        f"{total_updates} total updates, {total_train_samples} total samples"
+    )
 
     # ---- metrics accumulators for logging ----
     acc_loss = 0.0
     acc_reward_mean = 0.0
     acc_reward_max = 0.0
+    acc_reward_post_mean = 0.0
+    acc_reward_post_max = 0.0
+    acc_reward_post_min = 0.0
     acc_entropy = 0.0
     acc_policy_loss = 0.0
     acc_kl = 0.0
@@ -355,32 +397,45 @@ def main():
         logger.info(f"{'='*60}")
 
         epoch_rewards = []
-        pbar = tqdm(train_files, desc=f"Epoch {epoch + 1}/{num_epochs}")
+        batch_starts = range(0, len(train_files), micro_batch_size)
+        pbar = tqdm(batch_starts, desc=f"Epoch {epoch + 1}/{num_epochs}")
 
-        for bc_path in pbar:
-            bm_name = os.path.basename(bc_path).replace(".bc", "")
-            try:
-                batch = build_single_sample(bc_path)
-            except Exception as e:
-                logger.warning(f"Skipping {bm_name}: {e}")
-                skipped += 1
+        for batch_start in pbar:
+            bc_paths = train_files[batch_start : batch_start + micro_batch_size]
+            batch, batch_skipped = build_batch_samples(bc_paths, logger)
+            skipped += batch_skipped
+            if batch is None:
                 continue
 
             try:
-                metrics = trainer.train_step(batch)
+                next_step = global_step + 1
+                metrics = trainer.train_step(
+                    batch,
+                    step_id=next_step,
+                    epoch=epoch + 1,
+                )
             except Exception as e:
-                logger.warning(f"Train step failed for {bm_name}: {e}")
-                skipped += 1
+                logger.warning(
+                    f"Train step failed for batch starting at idx={batch_start} "
+                    f"(size={len(batch['bc_path'])}): {e}"
+                )
+                skipped += len(batch["bc_path"])
                 continue
 
-            global_step += 1
+            global_step = next_step
             mean_reward = metrics["reward_mean"]
             max_reward = metrics["reward_max"]
+            post_mean_reward = metrics.get("reward_post_mean", mean_reward)
+            post_max_reward = metrics.get("reward_post_max", max_reward)
+            post_min_reward = metrics.get("reward_post_min", metrics.get("reward_min", mean_reward))
             epoch_rewards.append(mean_reward)
 
             acc_loss += metrics["loss"]
             acc_reward_mean += mean_reward
             acc_reward_max += max_reward
+            acc_reward_post_mean += post_mean_reward
+            acc_reward_post_max += post_max_reward
+            acc_reward_post_min += post_min_reward
             acc_entropy += metrics.get("entropy", 0.0)
             acc_policy_loss += metrics.get("policy_loss", 0.0)
             acc_kl += metrics.get("kl", 0.0)
@@ -392,6 +447,7 @@ def main():
                 "loss": f"{metrics['loss']:.4f}",
                 "rew": f"{mean_reward:.4f}",
                 "step": global_step,
+                "bs": len(batch["bc_path"]),
             })
 
             # ---- periodic logging ----
@@ -399,6 +455,9 @@ def main():
                 avg_loss = acc_loss / acc_count
                 avg_reward_mean = acc_reward_mean / acc_count
                 avg_reward_max = acc_reward_max / acc_count
+                avg_reward_post_mean = acc_reward_post_mean / acc_count
+                avg_reward_post_max = acc_reward_post_max / acc_count
+                avg_reward_post_min = acc_reward_post_min / acc_count
                 avg_entropy = acc_entropy / acc_count
                 avg_policy_loss = acc_policy_loss / acc_count
                 avg_kl = acc_kl / acc_count
@@ -410,6 +469,9 @@ def main():
                 writer.add_scalar("train/reward_mean", avg_reward_mean, global_step)
                 writer.add_scalar("train/reward_max", avg_reward_max, global_step)
                 writer.add_scalar("train/reward_geomean", avg_reward_geomean, global_step)
+                writer.add_scalar("train/reward_post_mean", avg_reward_post_mean, global_step)
+                writer.add_scalar("train/reward_post_max", avg_reward_post_max, global_step)
+                writer.add_scalar("train/reward_post_min", avg_reward_post_min, global_step)
                 writer.add_scalar("train/entropy", avg_entropy, global_step)
                 writer.add_scalar("train/kl", avg_kl, global_step)
                 writer.add_scalar("train/clip_frac", avg_clip_frac, global_step)
@@ -422,6 +484,9 @@ def main():
                     f"reward_mean={avg_reward_mean:.4f} | "
                     f"reward_max={avg_reward_max:.4f} | "
                     f"reward_geomean={avg_reward_geomean:.4f} | "
+                    f"reward_post_mean={avg_reward_post_mean:.4f} | "
+                    f"reward_post_max={avg_reward_post_max:.4f} | "
+                    f"reward_post_min={avg_reward_post_min:.4f} | "
                     f"entropy={avg_entropy:.4f} | "
                     f"clip_frac={avg_clip_frac:.4f}"
                 )
@@ -429,6 +494,9 @@ def main():
                 acc_loss = 0.0
                 acc_reward_mean = 0.0
                 acc_reward_max = 0.0
+                acc_reward_post_mean = 0.0
+                acc_reward_post_max = 0.0
+                acc_reward_post_min = 0.0
                 acc_entropy = 0.0
                 acc_policy_loss = 0.0
                 acc_kl = 0.0
